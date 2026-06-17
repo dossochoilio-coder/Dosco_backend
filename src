@@ -1,0 +1,998 @@
+// ════════════════════════════════════════════════════════════════
+// MOTEUR DE JEU DOSCO — CÔTÉ SERVEUR (autorité anti-triche)
+// Le serveur valide CHAQUE coup. Le client ne peut jamais tricher.
+// ════════════════════════════════════════════════════════════════
+
+export const VALID_CELLS = new Set(["D1","C2","D2","E2","A3","B3","C3","D3","E3","F3","G3","A4","B4","C4","D4","E4","F4","G4","A5","B5","C5","D5","E5","F5","G5","A6","B6","C6","D6","E6","F6","G6","A7","B7","C7","D7","E7","F7","G7","C8","D8","E8","D9"]);
+const COL = {A:0,B:1,C:2,D:3,E:4,F:5,G:6};
+const COLR = ["A","B","C","D","E","F","G"];
+const toRC = c => ({c:COL[c[0]], r:parseInt(c.slice(1))-1});
+const toCoord = (c,r) => { if(c<0||c>6||r<0||r>8)return null; const k=COLR[c]+(r+1); return VALID_CELLS.has(k)?k:null; };
+
+// Morphologies canoniques (format [dc, dr])
+export const DIRS = {
+  W: {
+    Sirus:[[-1,1],[0,1],[1,1],[-1,0],[1,0],[-1,-1],[0,-1],[1,-1]],
+    Alhena:[[-1,1],[0,1],[1,1],[-1,0],[1,0],[0,-1]],
+    Altair:[[-1,1],[1,1],[-1,0],[1,0],[-1,-1],[1,-1]],
+    Vega:[[0,1],[-1,0],[1,0],[-1,-1],[0,-1],[1,-1]],
+    Deneb:[[-1,1],[0,1],[1,1],[-1,-1],[0,-1],[1,-1]],
+    Merak:[[0,1],[-1,0],[1,0],[0,-1]],
+    Alioth:[[-1,1],[1,1],[-1,-1],[1,-1]],
+  },
+  B: {
+    Rigel:[[-1,1],[0,1],[1,1],[-1,0],[1,0],[-1,-1],[0,-1],[1,-1]],
+    Acrux:[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[0,1]],
+    Hadar:[[-1,-1],[1,-1],[-1,0],[1,0],[-1,1],[1,1]],
+    Epi:[[0,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]],
+    Spica:[[-1,-1],[0,-1],[1,-1],[-1,1],[0,1],[1,1]],
+    Mimosa:[[0,-1],[-1,0],[1,0],[0,1]],
+    Regulus:[[-1,-1],[1,-1],[-1,1],[1,1]],
+  }
+};
+
+export const INIT_BOARD = {
+  D1:{color:"W",type:"Sirus"},C2:{color:"W",type:"Altair"},E2:{color:"W",type:"Vega"},
+  A3:{color:"W",type:"Alioth"},B3:{color:"W",type:"Deneb"},F3:{color:"W",type:"Alhena"},G3:{color:"W",type:"Merak"},
+  D9:{color:"B",type:"Rigel"},C8:{color:"B",type:"Epi"},E8:{color:"B",type:"Hadar"},
+  A7:{color:"B",type:"Mimosa"},B7:{color:"B",type:"Acrux"},F7:{color:"B",type:"Spica"},G7:{color:"B",type:"Regulus"}
+};
+
+export function getMoves(coord, board){
+  const star = board[coord];
+  if(!star) return {moves:[], captures:[]};
+  const dirs = DIRS[star.color][star.type] || [];
+  const {c,r} = toRC(coord);
+  const moves=[], captures=[];
+  for(const [dc,dr] of dirs){
+    const nc=c+dc, nr=r+dr;
+    const target = toCoord(nc,nr);
+    if(!target) continue;
+    const occupant = board[target];
+    if(!occupant) moves.push(target);
+    else if(occupant.color !== star.color) captures.push(target);
+  }
+  return {moves, captures};
+}
+
+export function getAllCaptures(color, board){
+  const res={};
+  for(const [coord,star] of Object.entries(board)){
+    if(star.color!==color) continue;
+    const {captures}=getMoves(coord,board);
+    if(captures.length>0) res[coord]=captures;
+  }
+  return res;
+}
+
+// Valider qu'un coup est légal (capture obligatoire incluse)
+export function isLegalMove(board, from, to, color){
+  const star = board[from];
+  if(!star || star.color!==color) return false;
+  const {moves, captures} = getMoves(from, board);
+  const mandatory = getAllCaptures(color, board);
+  const hasMandatory = Object.keys(mandatory).length>0;
+  if(hasMandatory){
+    // Seules les captures sont légales
+    return captures.includes(to);
+  }
+  return moves.includes(to) || captures.includes(to);
+}
+
+export function checkEnd(board, lastMove, color, msc){
+  const opp = color==="W"?"B":"W";
+  let wCount=0, bCount=0;
+  for(const s of Object.values(board)){ if(s.color==="W")wCount++; else bCount++; }
+  // Élimination
+  if(wCount===0) return {winner:"B", type:"elimination"};
+  if(bCount===0) return {winner:"W", type:"elimination"};
+  // Infiltration : blanc atteint D9, bleu atteint D1
+  if(lastMove==="D9" && board["D9"]?.color==="W") return {winner:"W", type:"infiltration"};
+  if(lastMove==="D1" && board["D1"]?.color==="B") return {winner:"B", type:"infiltration"};
+  // Nulle 50 coups sans capture
+  if(msc>=50) return {winner:null, type:"draw"};
+  return null;
+}
+
+// Appliquer un coup validé
+export function applyMove(board, from, to){
+  const nb = {...board};
+  const isCapture = !!nb[to];
+  nb[to] = {...nb[from]};
+  delete nb[from];
+  return {board:nb, isCapture};
+}
+
+// ════════════════════════════════════════════════════════════════
+// VALIDATION SÉCURISÉE DES ACHATS IAP (côté serveur)
+// JAMAIS faire confiance au client. Toujours valider le reçu
+// auprès d'Apple / Google avant de créditer les étoiles.
+// ════════════════════════════════════════════════════════════════
+
+
+// Produits autorisés (la source de vérité est ici, pas chez le client)
+export const PRODUCTS = {
+  "dosco.starter":  { stars:100,  bonus:0,   type:"consumable" },
+  "dosco.explorer": { stars:300,  bonus:50,  type:"consumable" },
+  "dosco.champion": { stars:700,  bonus:150, type:"consumable" },
+  "dosco.legend":   { stars:1500, bonus:500, type:"consumable" },
+  "dosco.pass":     { stars:200,  bonus:0,   type:"non_consumable" },
+};
+
+// Anti-rejeu : un reçu déjà utilisé ne peut pas être recrédité
+const usedReceipts = new Set(); // En prod : table en base de données
+
+// ── Validation Apple App Store ──
+// https://developer.apple.com/documentation/appstorereceipts/verifyreceipt
+export async function validateApple(receiptData, isSandbox=false){
+  const url = isSandbox
+    ? "https://sandbox.itunes.apple.com/verifyReceipt"
+    : "https://buy.itunes.apple.com/verifyReceipt";
+  try {
+    const res = await fetch(url, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        "receipt-data": receiptData,
+        "password": process.env.APPLE_SHARED_SECRET || "", // App-specific shared secret
+        "exclude-old-transactions": true,
+      })
+    });
+    const data = await res.json();
+    // Code 21007 = reçu sandbox envoyé en prod → réessayer en sandbox
+    if(data.status === 21007 && !isSandbox){
+      return validateApple(receiptData, true);
+    }
+    if(data.status !== 0){
+      return { valid:false, error:`Apple status ${data.status}` };
+    }
+    // Extraire les achats
+    const purchases = (data.receipt?.in_app || []).map(p => ({
+      productId: p.product_id,
+      transactionId: p.transaction_id,
+      purchaseDate: p.purchase_date_ms,
+    }));
+    return { valid:true, purchases, platform:"apple" };
+  } catch(e){
+    return { valid:false, error:"Apple validation failed: "+e.message };
+  }
+}
+
+// ── Validation Google Play ──
+// Nécessite l'API Google Play Developer + compte de service OAuth2
+export async function validateGoogle(packageName, productId, purchaseToken, accessToken){
+  const url = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${packageName}/purchases/products/${productId}/tokens/${purchaseToken}`;
+  try {
+    const res = await fetch(url, {
+      headers:{ "Authorization":`Bearer ${accessToken}` }
+    });
+    if(!res.ok) return { valid:false, error:`Google HTTP ${res.status}` };
+    const data = await res.json();
+    // purchaseState: 0 = acheté, 1 = annulé, 2 = en attente
+    if(data.purchaseState !== 0){
+      return { valid:false, error:"Achat non confirmé" };
+    }
+    return {
+      valid:true,
+      platform:"google",
+      purchases:[{ productId, transactionId:data.orderId, purchaseDate:data.purchaseTimeMillis }]
+    };
+  } catch(e){
+    return { valid:false, error:"Google validation failed: "+e.message };
+  }
+}
+
+// ── Point d'entrée : valider et créditer ──
+export async function processPurchase({ platform, receiptData, productId, purchaseToken, packageName, googleAccessToken, userId }){
+  // 1. Le produit doit exister
+  const product = PRODUCTS[productId];
+  if(!product) return { success:false, error:"Produit inconnu" };
+
+  // 2. Valider auprès du store
+  let result;
+  if(platform === "apple"){
+    result = await validateApple(receiptData);
+  } else if(platform === "google"){
+    result = await validateGoogle(packageName, productId, purchaseToken, googleAccessToken);
+  } else {
+    return { success:false, error:"Plateforme inconnue" };
+  }
+
+  if(!result.valid) return { success:false, error:result.error };
+
+  // 3. Vérifier que le produit acheté correspond
+  const match = result.purchases.find(p => p.productId === productId);
+  if(!match) return { success:false, error:"Produit non trouvé dans le reçu" };
+
+  // 4. Anti-rejeu (consommables uniquement — un non-consommable peut être restauré)
+  const receiptKey = `${platform}:${match.transactionId}`;
+  if(product.type === "consumable" && usedReceipts.has(receiptKey)){
+    return { success:false, error:"Reçu déjà utilisé" };
+  }
+  usedReceipts.add(receiptKey);
+
+  // 5. Créditer (en prod : transaction atomique en base)
+  const starsToGrant = product.stars + product.bonus;
+  return {
+    success:true,
+    productId,
+    starsGranted: starsToGrant,
+    transactionId: match.transactionId,
+    isNonConsumable: product.type === "non_consumable",
+  };
+}
+
+// ════════════════════════════════════════════════════════════════
+// RATE LIMITING — protection anti-abus / anti-bruteforce
+// Fenêtre glissante en mémoire par IP. Léger, sans dépendance.
+// (En cas de multi-instances, utiliser Redis ; ici suffisant pour 1 instance.)
+// ════════════════════════════════════════════════════════════════
+
+const buckets = new Map(); // clé → { count, resetAt }
+
+// Nettoyage périodique des entrées expirées
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of buckets) if (v.resetAt < now) buckets.delete(k);
+}, 60000).unref?.();
+
+function clientKey(req) {
+  // Derrière un proxy (Railway/Render/Fly), l'IP réelle est dans x-forwarded-for
+  const fwd = req.headers['x-forwarded-for'];
+  const ip = (fwd ? fwd.split(',')[0].trim() : req.socket?.remoteAddress) || 'unknown';
+  return ip;
+}
+
+/**
+ * Crée un middleware de limitation.
+ * @param {number} max  — nombre de requêtes autorisées par fenêtre
+ * @param {number} windowMs — durée de la fenêtre en ms
+ * @param {string} name — préfixe (pour cibler une route précise)
+ */
+export function rateLimit(max, windowMs, name = 'g') {
+  return (req, res, next) => {
+    const key = name + ':' + clientKey(req);
+    const now = Date.now();
+    let b = buckets.get(key);
+    if (!b || b.resetAt < now) {
+      b = { count: 0, resetAt: now + windowMs };
+      buckets.set(key, b);
+    }
+    b.count++;
+    res.setHeader('X-RateLimit-Limit', max);
+    res.setHeader('X-RateLimit-Remaining', Math.max(0, max - b.count));
+    if (b.count > max) {
+      const retry = Math.ceil((b.resetAt - now) / 1000);
+      res.setHeader('Retry-After', retry);
+      return res.status(429).json({ error: 'Trop de requêtes, réessayez plus tard', retryAfter: retry });
+    }
+    next();
+  };
+}
+
+// ════════════════════════════════════════════════════════════════
+// SERVEUR DOSCO — Multijoueur temps réel + IAP
+// WebSocket pour le jeu, HTTP/REST pour l'auth et les achats
+// ════════════════════════════════════════════════════════════════
+
+import express from 'express';
+import { WebSocketServer } from 'ws';
+import { createServer } from 'http';
+import jwt from 'jsonwebtoken';
+import { INIT_BOARD, isLegalMove, applyMove, checkEnd, getAllCaptures } from './game-engine.js';
+import { processPurchase } from './iap-validation.js';
+import {
+  initStorage, getUser, getUserByName, saveUser, deleteUser,
+  getProgress, saveProgress, receiptExists, saveReceipt, storageBackend,
+} from './storage.js';
+import { hashPassword, verifyPassword, validateName, validatePassword } from './auth.js';
+import { rateLimit } from './rate-limit.js';
+
+// Galaxies = arènes de mise (source de vérité serveur, anti-triche)
+const GALAXIES = {
+  voie_lactee: { stake: 10 },
+  andromede:   { stake: 50 },
+  sombrero:    { stake: 150 },
+  tourbillon:  { stake: 500 },
+  cigare:      { stake: 1500 },
+};
+
+const JWT_SECRET = process.env.JWT_SECRET || "dosco_dev_secret_CHANGE_IN_PROD";
+const PORT = process.env.PORT || 8080;
+
+if (JWT_SECRET === "dosco_dev_secret_CHANGE_IN_PROD") {
+  console.warn('⚠️  JWT_SECRET non défini — utilisez un secret fort en production !');
+}
+
+const app = express();
+app.use(express.json({ limit: '256kb' }));
+app.set('trust proxy', 1); // derrière le proxy Railway/Render/Fly
+
+// Cache mémoire des utilisateurs actifs (write-through vers le stockage persistant)
+const userCache = new Map(); // uid → user
+async function loadUser(uid) {
+  if (userCache.has(uid)) return userCache.get(uid);
+  const u = await getUser(uid);
+  if (u) userCache.set(uid, u);
+  return u;
+}
+async function persistUser(user) {
+  userCache.set(user.uid, user);
+  await saveUser(user);
+}
+
+// ════════════════════════════════════════════
+// REST API
+// ════════════════════════════════════════════
+
+// Inscription : pseudo + mot de passe hashé (scrypt)
+app.post('/api/register', rateLimit(10, 60000, 'register'), async (req, res) => {
+  try {
+    const { name, password } = req.body || {};
+    if (!validateName(name)) return res.status(400).json({ error: "Pseudo invalide (2-14 caractères)" });
+    if (!validatePassword(password)) return res.status(400).json({ error: "Mot de passe invalide (min. 6 caractères)" });
+    if (await getUserByName(name.trim())) return res.status(409).json({ error: "Ce pseudo est déjà pris" });
+    const uid = "usr_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    const user = { uid, name: name.trim(), passHash: hashPassword(password),
+      stars: 100, rank: "Naine Blanche", wins: 0, losses: 0, hasPass: false, createdAt: Date.now() };
+    await persistUser(user);
+    const token = jwt.sign({ uid }, JWT_SECRET, { expiresIn: '30d' });
+    const { passHash, ...safe } = user;
+    res.json({ token, user: safe });
+  } catch (e) { console.error('register', e); res.status(500).json({ error: "Erreur serveur" }); }
+});
+
+// Connexion : vérifie le mot de passe (réponse uniforme anti-énumération)
+app.post('/api/login', rateLimit(10, 60000, 'login'), async (req, res) => {
+  try {
+    const { name, password } = req.body || {};
+    if (!name || !password) return res.status(400).json({ error: "Pseudo et mot de passe requis" });
+    const user = await getUserByName(name.trim());
+    if (!user || !user.passHash || !verifyPassword(password, user.passHash)) {
+      return res.status(401).json({ error: "Identifiants incorrects" });
+    }
+    userCache.set(user.uid, user);
+    const token = jwt.sign({ uid: user.uid }, JWT_SECRET, { expiresIn: '30d' });
+    const { passHash, ...safe } = user;
+    res.json({ token, user: safe });
+  } catch (e) { console.error('login', e); res.status(500).json({ error: "Erreur serveur" }); }
+});
+
+// Connexion invité (sans mot de passe)
+app.post('/api/guest', rateLimit(20, 60000, 'guest'), async (req, res) => {
+  try {
+    const { name } = req.body || {};
+    const uid = "gst_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    const user = { uid, name: (validateName(name) ? name.trim() : "Invité"),
+      stars: 100, rank: "Naine Blanche", wins: 0, losses: 0, hasPass: false, guest: true, createdAt: Date.now() };
+    await persistUser(user);
+    const token = jwt.sign({ uid }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user });
+  } catch (e) { res.status(500).json({ error: "Erreur serveur" }); }
+});
+
+// Middleware d'authentification (async — charge depuis le stockage)
+async function auth(req, res, next){
+  const token = req.headers.authorization?.replace('Bearer ','');
+  if(!token) return res.status(401).json({error:"Non authentifié"});
+  try {
+    const { uid } = jwt.verify(token, JWT_SECRET);
+    const user = await loadUser(uid);
+    if(!user) return res.status(401).json({error:"Utilisateur introuvable"});
+    req.user = user;
+    next();
+  } catch(e){ return res.status(401).json({error:"Token invalide"}); }
+}
+
+// Validation d'achat IAP (sécurisée serveur + anti-rejeu + persistance)
+app.post('/api/iap/validate', auth, rateLimit(30, 60000, 'iap'), async (req, res) => {
+  try {
+    const receiptId = req.body?.receiptId || req.body?.transactionId;
+    if (receiptId && await receiptExists(receiptId)) {
+      return res.status(409).json({ success:false, error:"Reçu déjà utilisé" });
+    }
+    const result = await processPurchase({ ...req.body, userId:req.user.uid });
+    if(result.success){
+      req.user.stars += result.starsGranted;
+      if(result.isNonConsumable) req.user.hasPass = true;
+      await persistUser(req.user);
+      if (receiptId) await saveReceipt(receiptId, req.user.uid, req.body?.productId);
+    }
+    res.json(result);
+  } catch(e){ console.error('iap', e); res.status(500).json({ success:false, error:"Erreur de validation" }); }
+});
+
+// Restauration des achats
+app.post('/api/iap/restore', auth, (req, res) => {
+  res.json({ success:true, hasPass: !!req.user.hasPass, stars: req.user.stars });
+});
+
+// Profil
+app.get('/api/me', auth, (req, res) => { const {passHash,...safe}=req.user; res.json({ user:safe }); });
+
+// Suppression de compte (droit RGPD)
+app.delete('/api/me', auth, async (req, res) => {
+  await deleteUser(req.user.uid);
+  userCache.delete(req.user.uid);
+  res.json({ success:true });
+});
+
+// ── Synchronisation cloud de la progression (persistante) ──
+app.post('/api/sync/push', auth, rateLimit(60, 60000, 'sync'), async (req, res) => {
+  try {
+    const { season, inventory } = req.body || {};
+    const existing = await getProgress(req.user.uid);
+    let mergedSeason = season;
+    // Anti-régression : ne jamais écraser une progression plus avancée
+    if (existing && existing.season) {
+      mergedSeason = { ...season,
+        stars: Math.max(existing.season.stars||0, season?.stars||0),
+        lifetimeStars: Math.max(existing.season.lifetimeStars||0, season?.lifetimeStars||0),
+        wins: Math.max(existing.season.wins||0, season?.wins||0),
+        bestStreak: Math.max(existing.season.bestStreak||0, season?.bestStreak||0) };
+    }
+    await saveProgress(req.user.uid, mergedSeason, inventory);
+    res.json({ success:true, ts: Date.now() });
+  } catch(e){ res.status(500).json({ error:"Erreur de synchronisation" }); }
+});
+
+app.get('/api/sync/pull', auth, async (req, res) => {
+  const data = await getProgress(req.user.uid);
+  if (!data) return res.json({ season:null, inventory:null });
+  res.json(data);
+});
+
+// Health check (sondes Railway/Render/Fly)
+app.get('/health', (req, res) => res.json({ status:"ok", backend:storageBackend(),
+  players:wss?.clients.size||0, games:games.size, queue:waitingQueue.length }));
+
+const server = createServer(app);
+
+// ════════════════════════════════════════════
+// WEBSOCKET — Multijoueur temps réel
+// ════════════════════════════════════════════
+const wss = new WebSocketServer({ server });
+
+const waitingQueue = [];        // joueurs en attente de match
+const games = new Map();        // gameId → état de la partie
+const playerSockets = new Map(); // uid → ws
+
+function send(ws, type, data){
+  if(ws.readyState === 1) ws.send(JSON.stringify({ type, ...data }));
+}
+
+function createGame(p1, p2){
+  const gameId = "game_" + Date.now() + "_" + Math.random().toString(36).slice(2,6);
+  // p1 = bleu (commence), p2 = blanc
+  const game = {
+    id: gameId,
+    board: JSON.parse(JSON.stringify(INIT_BOARD)),
+    turn: "B",
+    players: { B:p1.uid, W:p2.uid },
+    names:   { B:p1.name, W:p2.name },
+    stake: p1.stake || 0,
+    galaxy: p1.galaxy || "voie_lactee",
+    msc: 0,
+    moveCount: 0,
+    lastMove: null,
+    startedAt: Date.now(),
+  };
+  games.set(gameId, game);
+  p1.gameId = gameId; p2.gameId = gameId;
+  send(p1.ws, "game_start", { gameId, color:"B", opponent:p2.name, board:game.board, turn:"B", stake:game.stake, galaxy:game.galaxy });
+  send(p2.ws, "game_start", { gameId, color:"W", opponent:p1.name, board:game.board, turn:"B", stake:game.stake, galaxy:game.galaxy });
+  return game;
+}
+
+function handleMove(ws, uid, { gameId, from, to }){
+  const game = games.get(gameId);
+  if(!game) return send(ws, "error", { msg:"Partie introuvable" });
+  const color = game.players.B === uid ? "B" : (game.players.W === uid ? "W" : null);
+  if(!color) return send(ws, "error", { msg:"Vous n'êtes pas dans cette partie" });
+  if(game.turn !== color) return send(ws, "error", { msg:"Pas votre tour" });
+
+  // ── VALIDATION SERVEUR : le coup est-il légal ? (anti-triche) ──
+  if(!isLegalMove(game.board, from, to, color)){
+    return send(ws, "error", { msg:"Coup illégal", board:game.board, turn:game.turn });
+  }
+
+  // Appliquer
+  const { board, isCapture } = applyMove(game.board, from, to);
+  game.board = board;
+  game.msc = isCapture ? 0 : game.msc + 1;
+  game.lastMove = to;
+  game.moveCount++;
+
+  // Vérifier fin de partie
+  const end = checkEnd(game.board, to, color, game.msc);
+  const nextTurn = color === "B" ? "W" : "B";
+  game.turn = nextTurn;
+
+  // Diffuser le coup aux deux joueurs
+  const p1ws = playerSockets.get(game.players.B);
+  const p2ws = playerSockets.get(game.players.W);
+  const moveData = { gameId, from, to, isCapture, board:game.board, turn:nextTurn, by:color };
+  if(p1ws) send(p1ws, "move", moveData);
+  if(p2ws) send(p2ws, "move", moveData);
+
+  if(end){
+    settleStakes(game, end.winner).catch(e=>console.error('settle', e));
+    const endData = { gameId, winner:end.winner, type:end.type, stake:game.stake };
+    if(p1ws) send(p1ws, "game_end", endData);
+    if(p2ws) send(p2ws, "game_end", endData);
+    games.delete(gameId);
+  }
+}
+
+// Règlement atomique des mises (persiste les soldes + stats)
+async function settleStakes(game, winnerColor){
+  if(!winnerColor || game.stake <= 0) return;
+  const loserColor = winnerColor === "B" ? "W" : "B";
+  const winner = await loadUser(game.players[winnerColor]);
+  const loser  = await loadUser(game.players[loserColor]);
+  if(winner && loser){
+    winner.stars += game.stake; winner.wins = (winner.wins||0)+1;
+    loser.stars = Math.max(0, loser.stars - game.stake); loser.losses = (loser.losses||0)+1;
+    await persistUser(winner);
+    await persistUser(loser);
+  }
+}
+
+wss.on('connection', (ws) => {
+  let uid = null;
+
+  ws.on('message', async (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw); } catch(e){ return; }
+
+    switch(msg.type){
+      case "auth": {
+        try {
+          const decoded = jwt.verify(msg.token, JWT_SECRET);
+          uid = decoded.uid;
+          playerSockets.set(uid, ws);
+          ws.uid = uid;
+          send(ws, "authed", { uid });
+        } catch(e){ send(ws, "error", { msg:"Auth WS échouée" }); }
+        break;
+      }
+      case "find_match": {
+        if(!uid) return send(ws, "error", { msg:"Authentifiez-vous d'abord" });
+        const user = await loadUser(uid);
+        if(!user) return;
+        // La mise est déterminée par la galaxie choisie (source serveur)
+        const galaxyId = msg.galaxy || "voie_lactee";
+        const galaxy = GALAXIES[galaxyId];
+        if(!galaxy) return send(ws, "error", { msg:"Galaxie inconnue" });
+        const stake = galaxy.stake;
+        // Le joueur doit avoir assez d'étoiles pour miser
+        if(user.stars < stake){
+          return send(ws, "error", { msg:"Étoiles insuffisantes pour cette galaxie", need:stake, have:user.stars });
+        }
+        const me = { uid, name:user.name, ws, stake, galaxy:galaxyId };
+        // Apparier dans la même galaxie (même mise)
+        const idx = waitingQueue.findIndex(p => p.uid !== uid && p.galaxy === galaxyId);
+        if(idx >= 0){
+          const opponent = waitingQueue.splice(idx,1)[0];
+          createGame(opponent, me);
+        } else {
+          waitingQueue.push(me);
+          send(ws, "searching", { stake, galaxy:galaxyId });
+        }
+        break;
+      }
+      case "move": {
+        if(!uid) return;
+        handleMove(ws, uid, msg);
+        break;
+      }
+      case "cancel_search": {
+        const i = waitingQueue.findIndex(p => p.uid === uid);
+        if(i>=0) waitingQueue.splice(i,1);
+        send(ws, "search_cancelled", {});
+        break;
+      }
+      case "offer_draw": {
+        if(!uid || !msg.gameId) return;
+        const game = games.get(msg.gameId);
+        if(!game) return;
+        const color = game.players.B===uid?"B":(game.players.W===uid?"W":null);
+        if(!color) return;
+        // Transmettre la demande à l'adversaire
+        const oppColor = color==="B"?"W":"B";
+        const oppWs = playerSockets.get(game.players[oppColor]);
+        if(oppWs) send(oppWs, "draw_offered", { gameId:msg.gameId, by:color });
+        break;
+      }
+      case "draw_response": {
+        if(!uid || !msg.gameId) return;
+        const game = games.get(msg.gameId);
+        if(!game) return;
+        const p1ws=playerSockets.get(game.players.B), p2ws=playerSockets.get(game.players.W);
+        if(msg.accepted){
+          // Match nul : aucune mise échangée
+          const endData={gameId:msg.gameId,winner:null,type:"draw",stake:game.stake};
+          if(p1ws)send(p1ws,"game_end",endData);
+          if(p2ws)send(p2ws,"game_end",endData);
+          games.delete(msg.gameId);
+        }else{
+          // Refusé : notifier le proposeur
+          const color = game.players.B===uid?"B":"W";
+          const offererColor = color==="B"?"W":"B";
+          const offererWs = playerSockets.get(game.players[offererColor]);
+          if(offererWs) send(offererWs, "draw_declined", { gameId:msg.gameId });
+        }
+        break;
+      }
+      case "resign": {
+        if(!uid || !msg.gameId) return;
+        const game = games.get(msg.gameId);
+        if(!game) return;
+        const color = game.players.B===uid?"B":"W";
+        const winner = color==="B"?"W":"B";
+        settleStakes(game, winner).catch(e=>console.error('settle', e));
+        const p1ws=playerSockets.get(game.players.B), p2ws=playerSockets.get(game.players.W);
+        const endData={gameId:msg.gameId,winner,type:"forfeit",stake:game.stake};
+        if(p1ws)send(p1ws,"game_end",endData);
+        if(p2ws)send(p2ws,"game_end",endData);
+        games.delete(msg.gameId);
+        break;
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    if(uid){
+      playerSockets.delete(uid);
+      const i = waitingQueue.findIndex(p => p.uid === uid);
+      if(i>=0) waitingQueue.splice(i,1);
+      // Si en partie : l'adversaire gagne par abandon
+      for(const [gid, game] of games){
+        if(game.players.B===uid || game.players.W===uid){
+          const winner = game.players.B===uid ? "W" : "B";
+          settleStakes(game, winner).catch(e=>console.error('settle', e));
+          const oppWs = playerSockets.get(game.players[winner]);
+          if(oppWs) send(oppWs, "game_end", { gameId:gid, winner, type:"disconnect", stake:game.stake });
+          games.delete(gid);
+        }
+      }
+    }
+  });
+});
+
+// Démarrage : initialiser le stockage AVANT d'écouter
+initStorage().then(() => {
+  server.listen(PORT, () => {
+    console.log(`🌌 DOSCO backend sur le port ${PORT}`);
+    console.log(`   Stockage:  ${storageBackend()}`);
+    console.log(`   WebSocket: ws://localhost:${PORT}`);
+    console.log(`   REST API:  http://localhost:${PORT}/api`);
+  });
+}).catch(e => { console.error('Échec du démarrage:', e); process.exit(1); });
+
+// ════════════════════════════════════════════════════════════════
+// COUCHE DE PERSISTANCE
+// Utilise PostgreSQL si DATABASE_URL est défini (production),
+// sinon un stockage fichier JSON (développement / petits déploiements).
+// Le serveur survit ainsi aux redémarrages dans tous les cas.
+// ════════════════════════════════════════════════════════════════
+
+import fs from 'fs';
+import path from 'path';
+
+let DATA_DIR = process.env.DATA_DIR || './data';
+const USE_PG = !!process.env.DATABASE_URL;
+
+let pgPool = null;
+
+// ── Initialisation ──
+export async function initStorage() {
+  DATA_DIR = process.env.DATA_DIR || './data'; // (re)lecture au démarrage
+  if (USE_PG) {
+    try {
+      const pg = await import('pg');
+      pgPool = new pg.default.Pool({
+        connectionString: process.env.DATABASE_URL,
+        ssl: process.env.PGSSL === 'false' ? false : { rejectUnauthorized: false },
+      });
+      await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+          uid TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          pass_hash TEXT,
+          stars INTEGER DEFAULT 100,
+          rank TEXT DEFAULT 'Naine Blanche',
+          wins INTEGER DEFAULT 0,
+          losses INTEGER DEFAULT 0,
+          has_pass BOOLEAN DEFAULT FALSE,
+          data JSONB DEFAULT '{}',
+          created_at BIGINT
+        );
+        CREATE TABLE IF NOT EXISTS progress (
+          uid TEXT PRIMARY KEY REFERENCES users(uid) ON DELETE CASCADE,
+          season JSONB,
+          inventory JSONB,
+          updated_at BIGINT
+        );
+        CREATE TABLE IF NOT EXISTS receipts (
+          id TEXT PRIMARY KEY,
+          uid TEXT,
+          product_id TEXT,
+          ts BIGINT
+        );
+      `);
+      console.log('[storage] PostgreSQL connecté et schéma prêt');
+      return;
+    } catch (e) {
+      console.error('[storage] Échec PostgreSQL, repli sur fichier:', e.message);
+      pgPool = null;
+    }
+  }
+  // Repli fichier
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  console.log('[storage] Stockage fichier JSON dans', DATA_DIR);
+}
+
+// ── Helpers fichier ──
+function fileLoad(name) {
+  try {
+    const p = path.join(DATA_DIR, name + '.json');
+    if (!fs.existsSync(p)) return {};
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch (e) { return {}; }
+}
+function fileSave(name, obj) {
+  try {
+    const p = path.join(DATA_DIR, name + '.json');
+    const tmp = p + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(obj));
+    fs.renameSync(tmp, p); // écriture atomique
+  } catch (e) { console.error('[storage] save error', name, e.message); }
+}
+
+// ════════════════════════════════════════════
+// API utilisateurs
+// ════════════════════════════════════════════
+export async function getUser(uid) {
+  if (pgPool) {
+    const r = await pgPool.query('SELECT * FROM users WHERE uid=$1', [uid]);
+    if (!r.rows[0]) return null;
+    const u = r.rows[0];
+    return { uid:u.uid, name:u.name, passHash:u.pass_hash, stars:u.stars, rank:u.rank,
+             wins:u.wins, losses:u.losses, hasPass:u.has_pass, ...u.data, createdAt:Number(u.created_at) };
+  }
+  const users = fileLoad('users');
+  return users[uid] || null;
+}
+
+export async function getUserByName(name) {
+  if (pgPool) {
+    const r = await pgPool.query('SELECT * FROM users WHERE name=$1', [name]);
+    if (!r.rows[0]) return null;
+    return getUser(r.rows[0].uid);
+  }
+  const users = fileLoad('users');
+  return Object.values(users).find(u => u.name === name) || null;
+}
+
+export async function saveUser(user) {
+  if (pgPool) {
+    await pgPool.query(`
+      INSERT INTO users (uid,name,pass_hash,stars,rank,wins,losses,has_pass,created_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      ON CONFLICT (uid) DO UPDATE SET
+        name=$2, pass_hash=$3, stars=$4, rank=$5, wins=$6, losses=$7, has_pass=$8
+    `, [user.uid, user.name, user.passHash||null, user.stars||100, user.rank||'Naine Blanche',
+        user.wins||0, user.losses||0, !!user.hasPass, user.createdAt||Date.now()]);
+    return user;
+  }
+  const users = fileLoad('users');
+  users[user.uid] = user;
+  fileSave('users', users);
+  return user;
+}
+
+export async function deleteUser(uid) {
+  if (pgPool) { await pgPool.query('DELETE FROM users WHERE uid=$1', [uid]); return; }
+  const users = fileLoad('users');
+  delete users[uid];
+  fileSave('users', users);
+  const prog = fileLoad('progress');
+  delete prog[uid];
+  fileSave('progress', prog);
+}
+
+// ════════════════════════════════════════════
+// API progression (sync cloud)
+// ════════════════════════════════════════════
+export async function getProgress(uid) {
+  if (pgPool) {
+    const r = await pgPool.query('SELECT * FROM progress WHERE uid=$1', [uid]);
+    if (!r.rows[0]) return null;
+    return { season:r.rows[0].season, inventory:r.rows[0].inventory, ts:Number(r.rows[0].updated_at) };
+  }
+  const prog = fileLoad('progress');
+  return prog[uid] || null;
+}
+
+export async function saveProgress(uid, season, inventory) {
+  const ts = Date.now();
+  if (pgPool) {
+    await pgPool.query(`
+      INSERT INTO progress (uid,season,inventory,updated_at) VALUES ($1,$2,$3,$4)
+      ON CONFLICT (uid) DO UPDATE SET season=$2, inventory=$3, updated_at=$4
+    `, [uid, season, inventory, ts]);
+    return;
+  }
+  const prog = fileLoad('progress');
+  prog[uid] = { season, inventory, ts };
+  fileSave('progress', prog);
+}
+
+// ════════════════════════════════════════════
+// API reçus IAP (anti-rejeu)
+// ════════════════════════════════════════════
+export async function receiptExists(id) {
+  if (pgPool) {
+    const r = await pgPool.query('SELECT 1 FROM receipts WHERE id=$1', [id]);
+    return r.rows.length > 0;
+  }
+  const receipts = fileLoad('receipts');
+  return !!receipts[id];
+}
+
+export async function saveReceipt(id, uid, productId) {
+  if (pgPool) {
+    await pgPool.query('INSERT INTO receipts (id,uid,product_id,ts) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING',
+      [id, uid, productId, Date.now()]);
+    return;
+  }
+  const receipts = fileLoad('receipts');
+  receipts[id] = { uid, productId, ts: Date.now() };
+  fileSave('receipts', receipts);
+}
+
+export function storageBackend() {
+  return pgPool ? 'postgresql' : 'file';
+}
+
+// ════════════════════════════════════════════════════════════════
+// AUTHENTIFICATION SÉCURISÉE
+// Hash de mot de passe avec scrypt (module natif crypto, sans dépendance).
+// scrypt est résistant aux attaques GPU/ASIC — recommandé pour les mots de passe.
+// ════════════════════════════════════════════════════════════════
+
+import crypto from 'crypto';
+
+const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1, keylen: 64 };
+
+// Hache un mot de passe : renvoie "salt:hash" (hex)
+export function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(password, salt, SCRYPT_PARAMS.keylen, {
+    N: SCRYPT_PARAMS.N, r: SCRYPT_PARAMS.r, p: SCRYPT_PARAMS.p,
+  });
+  return salt.toString('hex') + ':' + hash.toString('hex');
+}
+
+// Vérifie un mot de passe en temps constant (anti timing-attack)
+export function verifyPassword(password, stored) {
+  try {
+    const [saltHex, hashHex] = stored.split(':');
+    const salt = Buffer.from(saltHex, 'hex');
+    const expected = Buffer.from(hashHex, 'hex');
+    const actual = crypto.scryptSync(password, salt, SCRYPT_PARAMS.keylen, {
+      N: SCRYPT_PARAMS.N, r: SCRYPT_PARAMS.r, p: SCRYPT_PARAMS.p,
+    });
+    // timingSafeEqual exige des buffers de même longueur
+    if (actual.length !== expected.length) return false;
+    return crypto.timingSafeEqual(actual, expected);
+  } catch (e) {
+    return false;
+  }
+}
+
+// Validation basique d'un pseudo
+export function validateName(name) {
+  if (typeof name !== 'string') return false;
+  const trimmed = name.trim();
+  return trimmed.length >= 2 && trimmed.length <= 14 && /^[\w\-À-ÿ ]+$/.test(trimmed);
+}
+
+// Validation basique d'un mot de passe
+export function validatePassword(pw) {
+  return typeof pw === 'string' && pw.length >= 6 && pw.length <= 128;
+}
+
+// ════════════════════════════════════════════════════════════════
+// CLIENT MULTIJOUEUR DOSCO — à intégrer dans le jeu (DOSCO_Game_Mockup.jsx)
+// Remplace la simulation en ligne par une vraie connexion serveur.
+// ════════════════════════════════════════════════════════════════
+
+const DOSCONet = {
+  ws: null,
+  token: null,
+  uid: null,
+  gameId: null,
+  myColor: null,
+  handlers: {},
+  serverUrl: "" // Configurez votre serveur, ex: "wss://votre-domaine.com", // ⚠️ à remplacer par votre domaine
+
+  // S'authentifier (REST) puis ouvrir le WebSocket
+  async connect(playerName) {
+    // 1. Auth REST
+    const apiUrl = this.serverUrl.replace("wss://","https://").replace("ws://","http://");
+    const res = await fetch(`${apiUrl}/api/auth`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ name: playerName })
+    });
+    const { token, user } = await res.json();
+    this.token = token; this.uid = user.uid;
+
+    // 2. WebSocket
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(this.serverUrl);
+      this.ws.onopen = () => this._send("auth", { token });
+      this.ws.onmessage = (e) => this._onMessage(JSON.parse(e.data), resolve);
+      this.ws.onerror = () => reject(new Error("Connexion serveur échouée"));
+      this.ws.onclose = () => this._emit("disconnected", {});
+    });
+  },
+
+  _send(type, data) {
+    if (this.ws?.readyState === 1) this.ws.send(JSON.stringify({ type, ...data }));
+  },
+
+  _onMessage(msg, resolveConnect) {
+    switch(msg.type) {
+      case "authed": this.uid = msg.uid; resolveConnect?.(this.uid); break;
+      case "searching": this._emit("searching", msg); break;
+      case "game_start":
+        this.gameId = msg.gameId; this.myColor = msg.color;
+        this._emit("gameStart", msg); break;
+      case "move": this._emit("move", msg); break;
+      case "game_end": this._emit("gameEnd", msg); this.gameId = null; break;
+      case "draw_offered": this._emit("drawOffered", msg); break;
+      case "draw_declined": this._emit("drawDeclined", msg); break;
+      case "error": this._emit("error", msg); break;
+    }
+  },
+
+  // Chercher une partie avec une mise
+  findMatch(stake = 0) { this._send("find_match", { stake }); },
+  cancelSearch() { this._send("cancel_search", {}); },
+
+  // Envoyer un coup (le serveur le validera)
+  sendMove(from, to) { this._send("move", { gameId: this.gameId, from, to }); },
+  resign() { this._send("resign", { gameId: this.gameId }); },
+  offerDraw() { this._send("offer_draw", { gameId: this.gameId }); },
+  respondDraw(accepted) { this._send("draw_response", { gameId: this.gameId, accepted }); },
+
+  // Validation d'achat IAP via le serveur
+  async validatePurchase(platform, receiptData, productId, extra = {}) {
+    const apiUrl = this.serverUrl.replace("wss://","https://").replace("ws://","http://");
+    const res = await fetch(`${apiUrl}/api/iap/validate`, {
+      method:"POST",
+      headers:{"Content-Type":"application/json","Authorization":`Bearer ${this.token}`},
+      body: JSON.stringify({ platform, receiptData, productId, ...extra })
+    });
+    return res.json();
+  },
+
+  // Système d'événements
+  on(event, cb) { this.handlers[event] = cb; },
+  _emit(event, data) { this.handlers[event]?.(data); },
+
+  disconnect() { this.ws?.close(); this.ws = null; }
+};
+
+// Exemple d'utilisation dans le jeu :
+// await DOSCONet.connect("Commandant");
+// DOSCONet.on("gameStart", ({color, opponent, board}) => { /* afficher le plateau */ });
+// DOSCONet.on("move", ({board, turn}) => { /* mettre à jour le plateau */ });
+// DOSCONet.on("gameEnd", ({winner, type, stake}) => { /* afficher le résultat */ });
+// DOSCONet.findMatch(10); // chercher une partie avec mise de 10 étoiles
+// DOSCONet.sendMove("B7", "B6");
+
+if (typeof window !== "undefined") window.DOSCONet = DOSCONet;
+export default DOSCONet;
