@@ -35,7 +35,15 @@ if (JWT_SECRET === "dosco_dev_secret_CHANGE_IN_PROD") {
 const app = express();
 app.use(express.json({ limit: '256kb' }));
 app.set('trust proxy', 1); // derrière le proxy Railway/Render/Fly
-
+// CORS : autoriser le client du jeu à appeler l'API
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Max-Age', '86400');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
 // Cache mémoire des utilisateurs actifs (write-through vers le stockage persistant)
 const userCache = new Map(); // uid → user
 async function loadUser(uid) {
