@@ -1,0 +1,23 @@
+{
+  "name": "dosco-backend",
+  "version": "1.1.0",
+  "description": "Backend multijoueur + IAP pour DOSCO — production-ready",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node test_hardening.mjs && node test_galaxy_stakes.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "express": "^4.21.0",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "optionalDependencies": {
+    "pg": "^8.13.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
