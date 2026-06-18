@@ -35,15 +35,19 @@ if (JWT_SECRET === "dosco_dev_secret_CHANGE_IN_PROD") {
 const app = express();
 app.use(express.json({ limit: '256kb' }));
 app.set('trust proxy', 1); // derrière le proxy Railway/Render/Fly
-// CORS : autoriser le client du jeu à appeler l'API
+
+// ── CORS : autoriser le client du jeu à appeler l'API ──
+// Le jeu peut être servi depuis un fichier local (origine "null"), un domaine,
+// ou une app mobile. On autorise toutes les origines pour l'API publique du jeu.
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.header('Access-Control-Max-Age', '86400');
-  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method === 'OPTIONS') return res.status(204).end(); // réponse au preflight
   next();
 });
+
 // Cache mémoire des utilisateurs actifs (write-through vers le stockage persistant)
 const userCache = new Map(); // uid → user
 async function loadUser(uid) {
@@ -338,6 +342,19 @@ wss.on('connection', (ws) => {
         const oppColor = color==="B"?"W":"B";
         const oppWs = playerSockets.get(game.players[oppColor]);
         if(oppWs) send(oppWs, "draw_offered", { gameId:msg.gameId, by:color });
+        break;
+      }
+      case "chat": {
+        if(!uid || !msg.gameId || !msg.text) return;
+        const game = games.get(msg.gameId);
+        if(!game) return;
+        const color = game.players.B===uid?"B":(game.players.W===uid?"W":null);
+        if(!color) return;
+        const oppColor = color==="B"?"W":"B";
+        const oppWs = playerSockets.get(game.players[oppColor]);
+        // Anti-abus : limiter la longueur
+        const text = String(msg.text).slice(0,200);
+        if(oppWs) send(oppWs, "chat", { gameId:msg.gameId, text, by:color });
         break;
       }
       case "draw_response": {
