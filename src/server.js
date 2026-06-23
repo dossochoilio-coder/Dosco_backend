@@ -34,6 +34,7 @@ if (JWT_SECRET === "dosco_dev_secret_CHANGE_IN_PROD") {
 
 const app = express();
 app.use(express.json({ limit: '256kb' }));
+app.use(cors());
 app.set('trust proxy', 1); // derrière le proxy Railway/Render/Fly
 
 // ── CORS : autoriser le client du jeu à appeler l'API ──
@@ -174,6 +175,53 @@ app.post('/api/sync/push', auth, rateLimit(60, 60000, 'sync'), async (req, res) 
     await saveProgress(req.user.uid, mergedSeason, inventory);
     res.json({ success:true, ts: Date.now() });
   } catch(e){ res.status(500).json({ error:"Erreur de synchronisation" }); }
+});
+app.post("/auth/google", async (req, res) => {
+  const { accessToken } = req.body;
+
+  try {
+    const response = await fetch(
+      "https://www.googleapis.com/oauth2/v3/userinfo",
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    const user = await response.json();
+
+    res.json({
+      id: user.sub,
+      name: user.name,
+      email: user.email,
+      provider: "google",
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Google auth failed" });
+  }
+});
+app.post("/auth/facebook", async (req, res) => {
+  const { accessToken } = req.body;
+
+  try {
+    const response = await fetch(
+      `https://graph.facebook.com/me?fields=id,name,email&access_token=${accessToken}`
+    );
+
+    const user = await response.json();
+
+    res.json({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      provider: "facebook",
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Facebook auth failed" });
+  }
 });
 
 app.get('/api/sync/pull', auth, async (req, res) => {
