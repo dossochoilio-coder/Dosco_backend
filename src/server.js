@@ -34,7 +34,6 @@ if (JWT_SECRET === "dosco_dev_secret_CHANGE_IN_PROD") {
 
 const app = express();
 app.use(express.json({ limit: '256kb' }));
-app.use(cors());
 app.set('trust proxy', 1); // derrière le proxy Railway/Render/Fly
 
 // ── CORS : autoriser le client du jeu à appeler l'API ──
