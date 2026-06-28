@@ -234,6 +234,25 @@ const server = createServer(app);
 // ════════════════════════════════════════════
 
 const wss = new WebSocketServer({ server });
+
+// Heartbeat : fermer les connexions mortes toutes les 30s
+const HEARTBEAT_INTERVAL = 30000;
+setInterval(() => {
+  wss.clients.forEach(ws => {
+    if (ws.isAlive === false) {
+      ws.terminate();
+      return;
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, HEARTBEAT_INTERVAL);
+
+wss.on('connection', function onConn(ws) {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+});
+
 const waitingQueue = [];
 const games = new Map();
 const playerSockets = new Map();
@@ -557,6 +576,11 @@ wss.on('connection', (ws) => {
         } else if (oppWs) {
           send(oppWs, "rematch_declined", { gameId: msg.gameId });
         }
+        break;
+      }
+
+      case "ping": {
+        send(ws, "pong", { ts: Date.now() });
         break;
       }
 
