@@ -239,6 +239,8 @@ const games = new Map();
 const playerSockets = new Map();
 // Parties terminées gardées en cache 5 min pour permettre la revanche
 const endedGames = new Map();
+// Revanches en attente : si l'adversaire est offline, la demande est mise en buffer
+const pendingRematches = new Map(); // oppUid -> { gameId, fromUid, fromName, ts }
 function cacheEndedGame(game) {
   endedGames.set(game.id, { ...game });
   setTimeout(() => endedGames.delete(game.id), 5 * 60 * 1000);
@@ -369,6 +371,12 @@ wss.on('connection', (ws) => {
           playerSockets.set(uid, ws);
           ws.uid = uid;
           send(ws, "authed", { uid });
+          // Envoyer les revanches en attente
+          const pending = pendingRematches.get(uid);
+          if (pending && (Date.now() - pending.ts) < 2 * 60 * 1000) {
+            send(ws, "rematch_offered", { gameId: pending.gameId, from: pending.fromUid, fromName: pending.fromName });
+            pendingRematches.delete(uid);
+          }
         } catch (e) {
           send(ws, "error", { msg: "Auth WS échouée" });
         }
@@ -492,15 +500,25 @@ wss.on('connection', (ws) => {
         const game = getGameOrEnded(msg.gameId);
         if (!game) return;
 
-        const oppColor = game.players.B === uid ? "W" : "B";
-        const oppWs = playerSockets.get(game.players[oppColor]);
+        const myColor = game.players.B === uid ? "B" : "W";
+        const oppColor = myColor === "B" ? "W" : "B";
+        const oppUid = game.players[oppColor];
+        const oppWs = playerSockets.get(oppUid);
+        const fromName = game.names[myColor];
 
-        if (oppWs) {
+        if (oppWs && oppWs.readyState === 1) {
           send(oppWs, "rematch_offered", {
             gameId: msg.gameId,
             from: uid,
-            fromName: game.names[game.players.B === uid ? "B" : "W"]
+            fromName
           });
+        } else {
+          // Adversaire temporairement déconnecté : stocker la demande 2 min
+          pendingRematches.set(oppUid, { gameId: msg.gameId, fromUid: uid, fromName, ts: Date.now() });
+          setTimeout(() => {
+            const p = pendingRematches.get(oppUid);
+            if (p && p.fromUid === uid) pendingRematches.delete(oppUid);
+          }, 2 * 60 * 1000);
         }
         break;
       }
