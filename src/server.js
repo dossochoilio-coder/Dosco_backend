@@ -117,12 +117,14 @@ app.post('/api/login', rateLimit(10, 60000, 'login'), async (req, res) => {
 
 app.post('/api/guest', rateLimit(20, 60000, 'guest'), async (req, res) => {
   try {
-    const { name } = req.body || {};
+    const { name, stars } = req.body || {};
     const uid = "gst_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    // Accepter les étoiles locales du client pour les invités (synchronisation)
+    const initialStars = (typeof stars === "number" && stars >= 0) ? Math.min(stars, 999999) : 100;
     const user = {
       uid,
       name: (validateName(name) ? name.trim() : "Invité"),
-      stars: 100,
+      stars: initialStars,
       rank: "Naine Blanche",
       wins: 0,
       losses: 0,
@@ -235,6 +237,15 @@ const wss = new WebSocketServer({ server });
 const waitingQueue = [];
 const games = new Map();
 const playerSockets = new Map();
+// Parties terminées gardées en cache 5 min pour permettre la revanche
+const endedGames = new Map();
+function cacheEndedGame(game) {
+  endedGames.set(game.id, { ...game });
+  setTimeout(() => endedGames.delete(game.id), 5 * 60 * 1000);
+}
+function getGameOrEnded(gameId) {
+  return games.get(gameId) || endedGames.get(gameId);
+}
 
 function send(ws, type, data) {
   if (ws && ws.readyState === 1) {
@@ -303,9 +314,10 @@ function handleMove(ws, uid, { gameId, from, to }) {
 
   if (end) {
     settleStakes(game, end.winner).catch(e => console.error('settle', e));
-    const endData = { gameId, winner: end.winner, type: end.type, stake: game.stake };
+    const endData = { gameId, winner: end.winner, type: end.type, reason: end.reason || null, stake: game.stake };
     if (p1ws) send(p1ws, "game_end", endData);
     if (p2ws) send(p2ws, "game_end", endData);
+    cacheEndedGame(game);
     games.delete(gameId);
   }
 }
@@ -373,8 +385,17 @@ wss.on('connection', (ws) => {
         if (!galaxy) return send(ws, "error", { msg: "Galaxie inconnue" });
 
         const stake = galaxy.stake;
-        if (user.stars < stake) {
-          return send(ws, "error", { msg: "Étoiles insuffisantes pour cette galaxie", need: stake, have: user.stars });
+        // Pour les invités : accepter aussi les étoiles déclarées par le client
+        // (le client a pu gagner des étoiles en local que le serveur ne connaît pas encore)
+        const clientStars = (typeof msg.stars === "number" && msg.stars >= 0) ? msg.stars : 0;
+        const effectiveStars = user.guest ? Math.max(user.stars, clientStars) : user.stars;
+        if (effectiveStars < stake) {
+          return send(ws, "error", { msg: "Étoiles insuffisantes pour cette galaxie", need: stake, have: effectiveStars });
+        }
+        // Synchroniser le solde serveur si le client en déclare plus
+        if (user.guest && clientStars > user.stars) {
+          user.stars = clientStars;
+          await persistUser(user);
         }
 
         const me = { uid, name: user.name, ws, stake, galaxy: galaxyId };
@@ -430,11 +451,12 @@ wss.on('connection', (ws) => {
             gameId: msg.gameId,
             winner: null,
             type: "draw",
-            stake: game.stake,
-            message: "Match nul accepté. Les mises ont été restituées."
+            reason: "Match nul accepté — mises conservées",
+            stake: game.stake
           };
           if (p1ws) send(p1ws, "game_end", endData);
           if (p2ws) send(p2ws, "game_end", endData);
+          cacheEndedGame(game);
           games.delete(msg.gameId);
         } else {
           const color = game.players.B === uid ? "B" : "W";
@@ -459,6 +481,7 @@ wss.on('connection', (ws) => {
         const endData = { gameId: msg.gameId, winner, type: "forfeit", stake: game.stake };
         if (p1ws) send(p1ws, "game_end", endData);
         if (p2ws) send(p2ws, "game_end", endData);
+        cacheEndedGame(game);
         games.delete(msg.gameId);
         break;
       }
@@ -466,7 +489,7 @@ wss.on('connection', (ws) => {
       // ========== NOUVEAU : SYSTÈME DE REVANCHE ==========
       case "rematch_request": {
         if (!uid || !msg.gameId) return;
-        const game = games.get(msg.gameId);
+        const game = getGameOrEnded(msg.gameId);
         if (!game) return;
 
         const oppColor = game.players.B === uid ? "W" : "B";
@@ -484,7 +507,7 @@ wss.on('connection', (ws) => {
 
       case "rematch_response": {
         if (!uid || !msg.gameId || typeof msg.accepted !== "boolean") return;
-        const game = games.get(msg.gameId);
+        const game = getGameOrEnded(msg.gameId);
         if (!game) return;
 
         const oppColor = game.players.B === uid ? "W" : "B";
@@ -548,6 +571,7 @@ wss.on('connection', (ws) => {
           settleStakes(game, winner).catch(e => console.error('settle', e));
           const oppWs = playerSockets.get(game.players[winner]);
           if (oppWs) send(oppWs, "game_end", { gameId: gid, winner, type: "disconnect", stake: game.stake });
+          cacheEndedGame(game);
           games.delete(gid);
         }
       }
