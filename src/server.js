@@ -219,6 +219,104 @@ app.get('/api/sync/pull', auth, async (req, res) => {
   res.json(data);
 });
 
+// ── OAuth Google ──
+// Vérifie le credential JWT Google via l'API tokeninfo de Google
+app.post('/api/oauth/google', rateLimit(20, 60000, 'oauth'), async (req, res) => {
+  try {
+    const { credential } = req.body || {};
+    if (!credential) return res.status(400).json({ error: "Token manquant" });
+
+    // Vérifier le token via l'API Google
+    const gRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${credential}`);
+    if (!gRes.ok) return res.status(401).json({ error: "Token Google invalide" });
+    const payload = await gRes.json();
+
+    if (!payload.sub) return res.status(401).json({ error: "Token invalide" });
+
+    const googleId = "google_" + payload.sub;
+    const email = payload.email || (payload.sub + "@google.dosco");
+    const displayName = (payload.name || payload.email || "JOUEUR").toUpperCase().slice(0, 14);
+
+    // Chercher ou créer le compte
+    let user = await getUserByName(googleId);
+    if (!user) {
+      // Nouveau compte Google
+      const uid = "ggl_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+      user = {
+        uid,
+        name: displayName,
+        googleId,
+        email,
+        stars: 100,
+        rank: "Naine Blanche",
+        wins: 0, losses: 0, draws: 0,
+        hasPass: false,
+        provider: "google",
+        createdAt: Date.now()
+      };
+      await persistUser(user);
+      // Stocker l'index googleId → uid
+      await saveUser({ uid: googleId, _ref: uid });
+    } else if (user._ref) {
+      user = await loadUser(user._ref);
+    }
+
+    const token = jwt.sign({ uid: user.uid }, JWT_SECRET, { expiresIn: '30d' });
+    const { passHash, ...safe } = user;
+    res.json({ token, user: safe });
+  } catch(e) {
+    console.error('oauth/google', e);
+    res.status(500).json({ error: "Erreur serveur OAuth" });
+  }
+});
+
+// ── OAuth Facebook ──
+app.post('/api/oauth/facebook', rateLimit(20, 60000, 'oauth'), async (req, res) => {
+  try {
+    const { accessToken, userId } = req.body || {};
+    if (!accessToken || !userId) return res.status(400).json({ error: "Token manquant" });
+
+    // Vérifier via l'API Graph de Facebook
+    const fbRes = await fetch(`https://graph.facebook.com/me?fields=id,name,email&access_token=${accessToken}`);
+    if (!fbRes.ok) return res.status(401).json({ error: "Token Facebook invalide" });
+    const profile = await fbRes.json();
+
+    if (profile.id !== userId) return res.status(401).json({ error: "ID Facebook invalide" });
+
+    const fbId = "fb_" + profile.id;
+    const email = profile.email || (profile.id + "@fb.dosco");
+    const displayName = (profile.name || "JOUEUR FACEBOOK").toUpperCase().slice(0, 14);
+
+    let user = await getUserByName(fbId);
+    if (!user) {
+      const uid = "fb_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+      user = {
+        uid,
+        name: displayName,
+        fbId,
+        email,
+        stars: 100,
+        rank: "Naine Blanche",
+        wins: 0, losses: 0, draws: 0,
+        hasPass: false,
+        provider: "facebook",
+        createdAt: Date.now()
+      };
+      await persistUser(user);
+      await saveUser({ uid: fbId, _ref: uid });
+    } else if (user._ref) {
+      user = await loadUser(user._ref);
+    }
+
+    const token = jwt.sign({ uid: user.uid }, JWT_SECRET, { expiresIn: '30d' });
+    const { passHash, ...safe } = user;
+    res.json({ token, user: safe });
+  } catch(e) {
+    console.error('oauth/facebook', e);
+    res.status(500).json({ error: "Erreur serveur OAuth" });
+  }
+});
+
 app.get('/health', (req, res) => res.json({
   status: "ok",
   backend: storageBackend(),
