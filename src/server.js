@@ -452,29 +452,25 @@ wss.on('connection', (ws) => {
       }
 
       case "offer_draw": {
-        console.log("[OFFER_DRAW] uid:", uid, "gameId:", msg.gameId);
-        if (!uid || !msg.gameId) { console.log("[OFFER_DRAW] ABORT"); return; }
+        if (!uid || !msg.gameId) return;
         const game = games.get(msg.gameId);
-        if (!game) { console.log("[OFFER_DRAW] ABORT: game not found"); return; }
+        if (!game) return;
         const color = game.players.B === uid ? "B" : (game.players.W === uid ? "W" : null);
         if (!color) return;
 
         const oppColor = color === "B" ? "W" : "B";
         const oppWs = playerSockets.get(game.players[oppColor]);
-        console.log("[OFFER_DRAW] oppWs open:", oppWs?.readyState===1);
         if (oppWs) send(oppWs, "draw_offered", { gameId: msg.gameId, by: color });
         break;
       }
 
       case "draw_response": {
-        console.log("[DRAW] uid:", uid, "gameId:", msg.gameId, "accepted:", msg.accepted);
-        if (!uid || !msg.gameId) { console.log("[DRAW] ABORT: no uid or gameId"); return; }
+        if (!uid || !msg.gameId) return;
         const game = games.get(msg.gameId);
-        if (!game) { console.log("[DRAW] ABORT: game not found. games keys:", [...games.keys()]); return; }
+        if (!game) return;
 
         const p1ws = playerSockets.get(game.players.B);
         const p2ws = playerSockets.get(game.players.W);
-        console.log("[DRAW] p1ws open:", p1ws?.readyState===1, "p2ws open:", p2ws?.readyState===1);
 
         if (msg.accepted) {
           await settleDrawStakes(game);
@@ -499,10 +495,9 @@ wss.on('connection', (ws) => {
       }
 
       case "resign": {
-        console.log("[RESIGN] uid:", uid, "gameId:", msg.gameId);
-        if (!uid || !msg.gameId) { console.log("[RESIGN] ABORT: no uid or gameId"); return; }
+        if (!uid || !msg.gameId) return;
         const game = games.get(msg.gameId);
-        if (!game) { console.log("[RESIGN] ABORT: game not found in games map. games keys:", [...games.keys()]); return; }
+        if (!game) return; // partie déjà terminée, resign ignoré silencieusement
 
         const color = game.players.B === uid ? "B" : "W";
         const winner = color === "B" ? "W" : "B";
@@ -510,11 +505,9 @@ wss.on('connection', (ws) => {
 
         const p1ws = playerSockets.get(game.players.B);
         const p2ws = playerSockets.get(game.players.W);
-        console.log("[RESIGN] p1ws open:", p1ws?.readyState===1, "p2ws open:", p2ws?.readyState===1);
         const endData = { gameId: msg.gameId, winner, type: "forfeit", stake: game.stake };
         if (p1ws) send(p1ws, "game_end", endData);
         if (p2ws) send(p2ws, "game_end", endData);
-        console.log("[RESIGN] game_end sent to both players");
         cacheEndedGame(game);
         games.delete(msg.gameId);
         break;
