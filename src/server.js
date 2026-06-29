@@ -486,10 +486,8 @@ wss.on('connection', (ws) => {
         try {
           const decoded = jwt.verify(msg.token, JWT_SECRET);
           uid = decoded.uid;
-          const hadSocket = playerSockets.has(uid);
           playerSockets.set(uid, ws);
           ws.uid = uid;
-          console.log("[AUTH] uid=" + uid + " hadPreviousSocket=" + hadSocket + " totalSockets=" + playerSockets.size);
           send(ws, "authed", { uid });
           // Envoyer les revanches en attente
           const pending = pendingRematches.get(uid);
@@ -568,11 +566,10 @@ wss.on('connection', (ws) => {
       case "draw_response": {
         if (!uid || !msg.gameId) return;
         const game = games.get(msg.gameId);
-        if (!game) { console.log("[DRAW] game introuvable gameId=" + msg.gameId); return; }
+        if (!game) return;
 
         const p1ws = playerSockets.get(game.players.B);
         const p2ws = playerSockets.get(game.players.W);
-        console.log("[DRAW] accepted=" + msg.accepted + " playersB=" + game.players.B + " playersW=" + game.players.W + " p1ready=" + (p1ws?p1ws.readyState:"null") + " p2ready=" + (p2ws?p2ws.readyState:"null"));
 
         if (msg.accepted) {
           await settleDrawStakes(game);
@@ -585,7 +582,6 @@ wss.on('connection', (ws) => {
           };
           const s1 = p1ws ? send(p1ws, "game_end", endData) : false;
           const s2 = p2ws ? send(p2ws, "game_end", endData) : false;
-          console.log("[DRAW] game_end envoyé p1=" + s1 + " p2=" + s2);
           cacheEndedGame(game);
           games.delete(msg.gameId);
         } else {
@@ -600,7 +596,7 @@ wss.on('connection', (ws) => {
       case "resign": {
         if (!uid || !msg.gameId) return;
         const game = games.get(msg.gameId);
-        if (!game) { console.log("[RESIGN] game introuvable uid=" + uid + " gameId=" + msg.gameId); return; }
+        if (!game) return; // partie déjà terminée
 
         const color = game.players.B === uid ? "B" : "W";
         const winner = color === "B" ? "W" : "B";
@@ -608,11 +604,9 @@ wss.on('connection', (ws) => {
 
         const p1ws = playerSockets.get(game.players.B);
         const p2ws = playerSockets.get(game.players.W);
-        console.log("[RESIGN] uid=" + uid + " color=" + color + " playersB=" + game.players.B + " playersW=" + game.players.W + " p1ready=" + (p1ws?p1ws.readyState:"null") + " p2ready=" + (p2ws?p2ws.readyState:"null"));
         const endData = { gameId: msg.gameId, winner, type: "forfeit", stake: game.stake };
         const s1 = p1ws ? send(p1ws, "game_end", endData) : false;
         const s2 = p2ws ? send(p2ws, "game_end", endData) : false;
-        console.log("[RESIGN] game_end envoyé p1=" + s1 + " p2=" + s2);
         cacheEndedGame(game);
         games.delete(msg.gameId);
         break;
