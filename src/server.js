@@ -240,11 +240,11 @@ const HEARTBEAT_INTERVAL = 30000;
 setInterval(() => {
   wss.clients.forEach(ws => {
     if (ws.isAlive === false) {
-      ws.terminate();
+      try { ws.terminate(); } catch(e) {}
       return;
     }
     ws.isAlive = false;
-    ws.ping();
+    try { ws.ping(); } catch(e) { ws.isAlive = false; }
   });
 }, HEARTBEAT_INTERVAL);
 
