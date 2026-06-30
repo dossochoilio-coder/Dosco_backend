@@ -10,9 +10,10 @@
     "test": "node test_hardening.mjs && node test_galaxy_stakes.mjs"
   },
   "dependencies": {
-    "ws": "^8.18.0",
     "express": "^4.21.0",
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.2",
+    "web-push": "^3.6.7",
+    "ws": "^8.18.0"
   },
   "optionalDependencies": {
     "pg": "^8.13.0"
