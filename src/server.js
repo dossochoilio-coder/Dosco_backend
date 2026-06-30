@@ -586,8 +586,13 @@ wss.on('connection', (ws) => {
             reason: "Match nul accepté — mises conservées",
             stake: game.stake
           };
+          // Diagnostic détaillé : état des sockets des DEUX joueurs
+          console.log("[DRAW] B-uid=" + game.players.B + " W-uid=" + game.players.W);
+          console.log("[DRAW] p1(B)ws=" + (p1ws ? "existe,rs="+p1ws.readyState : "NULL") + " p2(W)ws=" + (p2ws ? "existe,rs="+p2ws.readyState : "NULL"));
+          console.log("[DRAW] playerSockets keys=" + JSON.stringify([...playerSockets.keys()]));
           const s1 = p1ws ? send(p1ws, "game_end", endData) : false;
           const s2 = p2ws ? send(p2ws, "game_end", endData) : false;
+          console.log("[DRAW] envoyé B=" + s1 + " W=" + s2 + " (accepteur uid=" + uid + ")");
           cacheEndedGame(game);
           games.delete(msg.gameId);
         } else {
