@@ -370,7 +370,9 @@ function getGameOrEnded(gameId) {
 
 function send(ws, type, data) {
   if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type, ...data }));
+    // IMPORTANT : type APRÈS le spread pour qu'il ne soit JAMAIS écrasé par data.type
+    // (game_end contient data.type="draw"/"forfeit" qui écrasait le type du message)
+    ws.send(JSON.stringify({ ...data, type }));
     return true;
   }
 }
@@ -436,7 +438,7 @@ function handleMove(ws, uid, { gameId, from, to }) {
 
   if (end) {
     settleStakes(game, end.winner).catch(e => console.error('settle', e));
-    const endData = { gameId, winner: end.winner, type: end.type, reason: end.reason || null, stake: game.stake };
+    const endData = { gameId, winner: end.winner, endType: end.type, reason: end.reason || null, stake: game.stake };
     if (p1ws) send(p1ws, "game_end", endData);
     if (p2ws) send(p2ws, "game_end", endData);
     cacheEndedGame(game);
@@ -495,12 +497,10 @@ wss.on('connection', (ws) => {
           }
           playerSockets.set(uid, ws);
           ws.uid = uid;
-          console.log("[AUTH] uid=" + uid + " sockets=" + playerSockets.size);
           send(ws, "authed", { uid });
           // Livrer un game_end en attente (si le client s'était déconnecté avant de le recevoir)
           const pendingEnd = pendingGameEnds.get(uid);
           if (pendingEnd && (Date.now() - pendingEnd.ts) < 5 * 60 * 1000) {
-            console.log("[AUTH] livraison game_end en attente pour uid=" + uid);
             send(ws, "game_end", pendingEnd.endData);
             pendingGameEnds.delete(uid);
           }
@@ -591,17 +591,13 @@ wss.on('connection', (ws) => {
           const endData = {
             gameId: msg.gameId,
             winner: null,
-            type: "draw",
+            endType: "draw",
             reason: "Match nul accepté — mises conservées",
             stake: game.stake
           };
           // Diagnostic détaillé : état des sockets des DEUX joueurs
-          console.log("[DRAW] B-uid=" + game.players.B + " W-uid=" + game.players.W);
-          console.log("[DRAW] p1(B)ws=" + (p1ws ? "existe,rs="+p1ws.readyState : "NULL") + " p2(W)ws=" + (p2ws ? "existe,rs="+p2ws.readyState : "NULL"));
-          console.log("[DRAW] playerSockets keys=" + JSON.stringify([...playerSockets.keys()]));
           const s1 = p1ws ? send(p1ws, "game_end", endData) : false;
           const s2 = p2ws ? send(p2ws, "game_end", endData) : false;
-          console.log("[DRAW] envoyé B=" + s1 + " W=" + s2 + " (accepteur uid=" + uid + ")");
           // Bufferiser pour livraison à la reconnexion (5 min)
           pendingGameEnds.set(game.players.B, { endData, ts: Date.now() });
           pendingGameEnds.set(game.players.W, { endData, ts: Date.now() });
@@ -627,12 +623,9 @@ wss.on('connection', (ws) => {
 
         const p1ws = playerSockets.get(game.players.B);
         const p2ws = playerSockets.get(game.players.W);
-        const endData = { gameId: msg.gameId, winner, type: "forfeit", stake: game.stake };
-        console.log("[RESIGN] B-uid=" + game.players.B + " W-uid=" + game.players.W);
-        console.log("[RESIGN] p1ws=" + (p1ws?"rs="+p1ws.readyState:"NULL") + " p2ws=" + (p2ws?"rs="+p2ws.readyState:"NULL"));
+        const endData = { gameId: msg.gameId, winner, endType: "forfeit", stake: game.stake };
         const s1 = p1ws ? send(p1ws, "game_end", endData) : false;
         const s2 = p2ws ? send(p2ws, "game_end", endData) : false;
-        console.log("[RESIGN] envoyé p1=" + s1 + " p2=" + s2 + " (resigner uid=" + uid + ")");
         pendingGameEnds.set(game.players.B, { endData, ts: Date.now() });
         pendingGameEnds.set(game.players.W, { endData, ts: Date.now() });
         cacheEndedGame(game);
@@ -730,20 +723,37 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     if (uid) {
-      playerSockets.delete(uid);
+      // Ne supprimer du playerSockets que si c'est encore CE socket (pas un reconnect)
+      if (playerSockets.get(uid) === ws) {
+        playerSockets.delete(uid);
+      }
       const i = waitingQueue.findIndex(p => p.uid === uid);
       if (i >= 0) waitingQueue.splice(i, 1);
 
-      for (const [gid, game] of games) {
-        if (game.players.B === uid || game.players.W === uid) {
-          const winner = game.players.B === uid ? "W" : "B";
-          settleStakes(game, winner).catch(e => console.error('settle', e));
-          const oppWs = playerSockets.get(game.players[winner]);
-          if (oppWs) send(oppWs, "game_end", { gameId: gid, winner, type: "disconnect", stake: game.stake });
-          cacheEndedGame(game);
-          games.delete(gid);
+      // DÉLAI DE GRÂCE : ne pas déclarer forfait immédiatement (micro-coupures mobiles fréquentes)
+      const disconnectedUid = uid;
+      setTimeout(() => {
+        // Si le joueur s'est reconnecté entre-temps, son socket est de nouveau dans playerSockets
+        const reconnected = playerSockets.has(disconnectedUid);
+        if (reconnected) {
+          return;
         }
-      }
+        // Toujours absent après le délai → forfait
+        for (const [gid, game] of games) {
+          if (game.players.B === disconnectedUid || game.players.W === disconnectedUid) {
+            const winner = game.players.B === disconnectedUid ? "W" : "B";
+            settleStakes(game, winner).catch(e => console.error('settle', e));
+            const endData = { gameId: gid, winner, endType: "disconnect", stake: game.stake };
+            const oppWs = playerSockets.get(game.players[winner]);
+            if (oppWs) send(oppWs, "game_end", endData);
+            // Bufferiser pour les deux (au cas où l'adversaire aussi se reconnecte)
+            pendingGameEnds.set(game.players.B, { endData, ts: Date.now() });
+            pendingGameEnds.set(game.players.W, { endData, ts: Date.now() });
+            cacheEndedGame(game);
+            games.delete(gid);
+          }
+        }
+      }, 12000); // 12 secondes de grâce
     }
   });
 });
