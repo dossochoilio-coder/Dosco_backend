@@ -356,6 +356,8 @@ const games = new Map();
 const playerSockets = new Map();
 // Parties terminées gardées en cache 5 min pour permettre la revanche
 const endedGames = new Map();
+// Buffer : game_end en attente de livraison (si le client se reconnecte)
+const pendingGameEnds = new Map(); // uid -> {endData, ts}
 // Revanches en attente : si l'adversaire est offline, la demande est mise en buffer
 const pendingRematches = new Map(); // oppUid -> { gameId, fromUid, fromName, ts }
 function cacheEndedGame(game) {
@@ -495,6 +497,13 @@ wss.on('connection', (ws) => {
           ws.uid = uid;
           console.log("[AUTH] uid=" + uid + " sockets=" + playerSockets.size);
           send(ws, "authed", { uid });
+          // Livrer un game_end en attente (si le client s'était déconnecté avant de le recevoir)
+          const pendingEnd = pendingGameEnds.get(uid);
+          if (pendingEnd && (Date.now() - pendingEnd.ts) < 5 * 60 * 1000) {
+            console.log("[AUTH] livraison game_end en attente pour uid=" + uid);
+            send(ws, "game_end", pendingEnd.endData);
+            pendingGameEnds.delete(uid);
+          }
           // Envoyer les revanches en attente
           const pending = pendingRematches.get(uid);
           if (pending && (Date.now() - pending.ts) < 2 * 60 * 1000) {
@@ -593,6 +602,9 @@ wss.on('connection', (ws) => {
           const s1 = p1ws ? send(p1ws, "game_end", endData) : false;
           const s2 = p2ws ? send(p2ws, "game_end", endData) : false;
           console.log("[DRAW] envoyé B=" + s1 + " W=" + s2 + " (accepteur uid=" + uid + ")");
+          // Bufferiser pour livraison à la reconnexion (5 min)
+          pendingGameEnds.set(game.players.B, { endData, ts: Date.now() });
+          pendingGameEnds.set(game.players.W, { endData, ts: Date.now() });
           cacheEndedGame(game);
           games.delete(msg.gameId);
         } else {
@@ -616,8 +628,13 @@ wss.on('connection', (ws) => {
         const p1ws = playerSockets.get(game.players.B);
         const p2ws = playerSockets.get(game.players.W);
         const endData = { gameId: msg.gameId, winner, type: "forfeit", stake: game.stake };
+        console.log("[RESIGN] B-uid=" + game.players.B + " W-uid=" + game.players.W);
+        console.log("[RESIGN] p1ws=" + (p1ws?"rs="+p1ws.readyState:"NULL") + " p2ws=" + (p2ws?"rs="+p2ws.readyState:"NULL"));
         const s1 = p1ws ? send(p1ws, "game_end", endData) : false;
         const s2 = p2ws ? send(p2ws, "game_end", endData) : false;
+        console.log("[RESIGN] envoyé p1=" + s1 + " p2=" + s2 + " (resigner uid=" + uid + ")");
+        pendingGameEnds.set(game.players.B, { endData, ts: Date.now() });
+        pendingGameEnds.set(game.players.W, { endData, ts: Date.now() });
         cacheEndedGame(game);
         games.delete(msg.gameId);
         break;
