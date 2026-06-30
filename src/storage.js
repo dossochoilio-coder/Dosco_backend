@@ -48,6 +48,20 @@ export async function initStorage() {
           product_id TEXT,
           ts BIGINT
         );
+        CREATE TABLE IF NOT EXISTS tournament_signups (
+          week_id TEXT NOT NULL,
+          uid TEXT NOT NULL,
+          name TEXT,
+          wins INTEGER DEFAULT 0,
+          losses INTEGER DEFAULT 0,
+          signed_at BIGINT,
+          PRIMARY KEY (week_id, uid)
+        );
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+          uid TEXT PRIMARY KEY,
+          subscription JSONB,
+          updated_at BIGINT
+        );
       `);
       console.log('[storage] PostgreSQL connecté et schéma prêt');
       return;
@@ -130,6 +144,25 @@ export async function deleteUser(uid) {
   fileSave('progress', prog);
 }
 
+// Renvoie tous les comptes ENREGISTRÉS (non invités) pour le classement.
+// Un compte enregistré a un passHash OU un oauth (pas guest).
+export async function getAllRegisteredUsers() {
+  if (pgPool) {
+    const r = await pgPool.query(
+      "SELECT uid, name, wins, losses, data FROM users WHERE pass_hash IS NOT NULL OR (data->>'oauth') IS NOT NULL"
+    );
+    return r.rows.map(u => ({
+      uid: u.uid, name: u.name, wins: u.wins||0, losses: u.losses||0,
+      draws: (u.data && u.data.draws) || 0,
+      country: (u.data && u.data.country) || 'XX'
+    }));
+  }
+  const users = fileLoad('users');
+  return Object.values(users)
+    .filter(u => u && !u.guest && (u.passHash || u.oauth))
+    .map(u => ({ uid:u.uid, name:u.name, wins:u.wins||0, losses:u.losses||0, draws:u.draws||0, country:u.country||'XX' }));
+}
+
 // ════════════════════════════════════════════
 // API progression (sync cloud)
 // ════════════════════════════════════════════
@@ -180,7 +213,83 @@ export async function saveReceipt(id, uid, productId) {
   fileSave('receipts', receipts);
 }
 
+// ════════════════════════════════════════════
+// API tournois
+// ════════════════════════════════════════════
+export async function addTournamentSignup(weekId, user) {
+  const ts = Date.now();
+  if (pgPool) {
+    await pgPool.query(
+      `INSERT INTO tournament_signups (week_id, uid, name, wins, losses, signed_at)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (week_id, uid) DO UPDATE SET name=$3, wins=$4, losses=$5`,
+      [weekId, user.uid, user.name, user.wins||0, user.losses||0, ts]
+    );
+    return;
+  }
+  const t = fileLoad('tournaments');
+  if (!t[weekId]) t[weekId] = {};
+  t[weekId][user.uid] = { uid:user.uid, name:user.name, wins:user.wins||0, losses:user.losses||0, signedAt:ts };
+  fileSave('tournaments', t);
+}
+
+export async function getTournamentSignups(weekId) {
+  if (pgPool) {
+    const r = await pgPool.query(
+      'SELECT uid, name, wins, losses, signed_at FROM tournament_signups WHERE week_id=$1 ORDER BY signed_at ASC',
+      [weekId]
+    );
+    return r.rows.map(x => ({ uid:x.uid, name:x.name, wins:x.wins||0, losses:x.losses||0, signedAt:Number(x.signed_at) }));
+  }
+  const t = fileLoad('tournaments');
+  return Object.values(t[weekId] || {});
+}
+
+export async function isSignedUp(weekId, uid) {
+  if (pgPool) {
+    const r = await pgPool.query('SELECT 1 FROM tournament_signups WHERE week_id=$1 AND uid=$2', [weekId, uid]);
+    return r.rows.length > 0;
+  }
+  const t = fileLoad('tournaments');
+  return !!(t[weekId] && t[weekId][uid]);
+}
+
+// ════════════════════════════════════════════
+// API push notifications
+// ════════════════════════════════════════════
+export async function savePushSubscription(uid, subscription) {
+  const ts = Date.now();
+  if (pgPool) {
+    await pgPool.query(
+      `INSERT INTO push_subscriptions (uid, subscription, updated_at) VALUES ($1,$2,$3)
+       ON CONFLICT (uid) DO UPDATE SET subscription=$2, updated_at=$3`,
+      [uid, subscription, ts]
+    );
+    return;
+  }
+  const p = fileLoad('push_subs');
+  p[uid] = { subscription, updatedAt: ts };
+  fileSave('push_subs', p);
+}
+
+export async function getPushSubscription(uid) {
+  if (pgPool) {
+    const r = await pgPool.query('SELECT subscription FROM push_subscriptions WHERE uid=$1', [uid]);
+    return r.rows[0] ? r.rows[0].subscription : null;
+  }
+  const p = fileLoad('push_subs');
+  return p[uid] ? p[uid].subscription : null;
+}
+
+export async function getAllPushSubscriptions() {
+  if (pgPool) {
+    const r = await pgPool.query('SELECT uid, subscription FROM push_subscriptions');
+    return r.rows.map(x => ({ uid:x.uid, subscription:x.subscription }));
+  }
+  const p = fileLoad('push_subs');
+  return Object.entries(p).map(([uid, v]) => ({ uid, subscription: v.subscription }));
+}
+
 export function storageBackend() {
   return pgPool ? 'postgresql' : 'file';
 }
-
