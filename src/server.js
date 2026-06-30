@@ -486,8 +486,14 @@ wss.on('connection', (ws) => {
         try {
           const decoded = jwt.verify(msg.token, JWT_SECRET);
           uid = decoded.uid;
+          // Fermer proprement un ancien socket pour le même uid (évite les sockets fantômes)
+          const oldWs = playerSockets.get(uid);
+          if (oldWs && oldWs !== ws && oldWs.readyState === 1) {
+            try { oldWs.close(4001, "reconnect"); } catch(e) {}
+          }
           playerSockets.set(uid, ws);
           ws.uid = uid;
+          console.log("[AUTH] uid=" + uid + " sockets=" + playerSockets.size);
           send(ws, "authed", { uid });
           // Envoyer les revanches en attente
           const pending = pendingRematches.get(uid);
