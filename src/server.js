@@ -11,9 +11,42 @@ import { processPurchase } from './iap-validation.js';
 import {
   initStorage, getUser, getUserByName, saveUser, deleteUser,
   getProgress, saveProgress, receiptExists, saveReceipt, storageBackend,
+  getAllRegisteredUsers, addTournamentSignup, getTournamentSignups, isSignedUp,
+  savePushSubscription, getPushSubscription, getAllPushSubscriptions,
 } from './storage.js';
 import { hashPassword, verifyPassword, validateName, validatePassword } from './auth.js';
 import { rateLimit } from './rate-limit.js';
+
+// Web Push (notifications même app fermée) — optionnel
+let webpush = null;
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC || '';
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE || '';
+try {
+  if (VAPID_PUBLIC && VAPID_PRIVATE) {
+    const mod = await import('web-push');
+    webpush = mod.default;
+    webpush.setVapidDetails('mailto:contact@dosco.app', VAPID_PUBLIC, VAPID_PRIVATE);
+    console.log('[push] Web Push activé (VAPID configuré)');
+  } else {
+    console.log('[push] VAPID non configuré — push désactivé (définir VAPID_PUBLIC/VAPID_PRIVATE)');
+  }
+} catch (e) {
+  console.log('[push] web-push indisponible:', e.message);
+}
+
+// Envoie une notification push à un uid (si abonné)
+async function sendPushTo(uid, payload) {
+  if (!webpush) return false;
+  try {
+    const sub = await getPushSubscription(uid);
+    if (!sub) return false;
+    await webpush.sendNotification(sub, JSON.stringify(payload));
+    return true;
+  } catch (e) {
+    console.error('[push] envoi échoué pour', uid, e.message);
+    return false;
+  }
+}
 
 // Galaxies = arènes de mise (source de vérité serveur, anti-triche)
 const GALAXIES = {
@@ -150,6 +183,7 @@ async function auth(req, res, next) {
     const user = await loadUser(uid);
     if (!user) return res.status(401).json({ error: "Utilisateur introuvable" });
     req.user = user;
+    req.uid = uid;
     next();
   } catch (e) {
     return res.status(401).json({ error: "Token invalide" });
@@ -317,6 +351,30 @@ app.post('/api/oauth/facebook', rateLimit(20, 60000, 'oauth'), async (req, res) 
   }
 });
 
+app.get('/api/vapid-public', (req, res) => res.json({ key: VAPID_PUBLIC }));
+
+// Endpoint : planifier une notification de match (heure du match du tournoi)
+// Le serveur enverra un push à l'uid à l'heure indiquée.
+app.post('/api/tournament/notify', auth, async (req, res) => {
+  try {
+    const { matchTime, opponent } = req.body || {};
+    const uid = req.uid;
+    const delay = Math.max(0, (Number(matchTime) || 0) - Date.now());
+    if (delay > 0 && delay < 7 * 24 * 3600 * 1000) {
+      setTimeout(() => {
+        sendPushTo(uid, {
+          title: "🏆 Votre match commence !",
+          body: opponent ? ("Affrontez " + opponent + " maintenant.") : "C'est l'heure de votre match de tournoi.",
+          tag: "tournament-match"
+        });
+      }, delay);
+    }
+    res.json({ scheduled: true, inMs: delay });
+  } catch (e) {
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
 app.get('/health', (req, res) => res.json({
   status: "ok",
   backend: storageBackend(),
@@ -446,27 +504,42 @@ function handleMove(ws, uid, { gameId, from, to }) {
   }
 }
 
+// ID de semaine ISO (identique au client) pour le tournoi hebdomadaire
+function isoWeekId() {
+  const d = new Date();
+  const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNr = (d.getUTCDay() + 6) % 7;
+  target.setUTCDate(target.getUTCDate() - dayNr + 3);
+  const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
+  const fdNr = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - fdNr + 3);
+  const week = 1 + Math.round((target - firstThursday) / (7 * 24 * 3600 * 1000));
+  return target.getUTCFullYear() + "-W" + String(week).padStart(2, "0");
+}
+
 async function settleStakes(game, winnerColor) {
-  if (!winnerColor || game.stake <= 0) return;
+  if (!winnerColor) return;
 
   const loserColor = winnerColor === "B" ? "W" : "B";
   const winner = await loadUser(game.players[winnerColor]);
   const loser = await loadUser(game.players[loserColor]);
 
   if (winner && loser) {
-    winner.stars += game.stake;
+    // Mise (uniquement si > 0)
+    if (game.stake > 0) {
+      winner.stars += game.stake;
+      loser.stars = Math.max(0, loser.stars - game.stake);
+    }
+    // Statistiques TOUJOURS comptées (pour le classement par % de victoires)
     winner.wins = (winner.wins || 0) + 1;
-    loser.stars = Math.max(0, loser.stars - game.stake);
     loser.losses = (loser.losses || 0) + 1;
     await persistUser(winner);
     await persistUser(loser);
   }
 }
 
-// Nouvelle fonction pour match nul (restitution des mises)
+// Match nul : restitution des mises + comptage des nulles (toujours)
 async function settleDrawStakes(game) {
-  if (game.stake <= 0) return;
-
   const p1 = await loadUser(game.players.B);
   const p2 = await loadUser(game.players.W);
 
@@ -701,6 +774,67 @@ wss.on('connection', (ws) => {
 
       case "ping": {
         send(ws, "pong", { ts: Date.now() });
+        break;
+      }
+
+      case "get_leaderboard": {
+        // Classement RÉEL : comptes enregistrés uniquement, min. 10 matchs, trié par % victoires
+        try {
+          const users = await getAllRegisteredUsers();
+          const ranked = users
+            .map(u => {
+              const total = (u.wins||0) + (u.losses||0) + (u.draws||0);
+              const decisive = (u.wins||0) + (u.losses||0);
+              const winPct = decisive > 0 ? Math.round((u.wins / decisive) * 100) : 0;
+              return { id: u.uid, name: u.name, wins: u.wins||0, losses: u.losses||0,
+                       draws: u.draws||0, total, winPct, country: u.country||'XX',
+                       pts: winPct, score: winPct };
+            })
+            .filter(u => u.total >= 10)          // min. 10 matchs
+            .sort((a, b) => b.winPct - a.winPct || b.wins - a.wins)
+            .slice(0, Number(msg.limit) || 50);
+          send(ws, "leaderboard", { players: ranked });
+        } catch (e) {
+          console.error('get_leaderboard', e);
+          send(ws, "leaderboard", { players: [] });
+        }
+        break;
+      }
+
+      case "tournament_signup": {
+        if (!uid) return;
+        try {
+          const u = await loadUser(uid);
+          if (!u || u.guest) {
+            return send(ws, "tournament_error", { msg: "Inscription réservée aux comptes enregistrés" });
+          }
+          const weekId = isoWeekId();
+          await addTournamentSignup(weekId, u);
+          const signups = await getTournamentSignups(weekId);
+          send(ws, "tournament_state", { weekId, signups, joined: true });
+        } catch (e) {
+          console.error('tournament_signup', e);
+        }
+        break;
+      }
+
+      case "get_tournament": {
+        try {
+          const weekId = isoWeekId();
+          const signups = await getTournamentSignups(weekId);
+          const joined = uid ? await isSignedUp(weekId, uid) : false;
+          send(ws, "tournament_state", { weekId, signups, joined });
+        } catch (e) {
+          console.error('get_tournament', e);
+          send(ws, "tournament_state", { weekId: isoWeekId(), signups: [], joined: false });
+        }
+        break;
+      }
+
+      case "save_push_sub": {
+        if (!uid || !msg.subscription) return;
+        try { await savePushSubscription(uid, msg.subscription); send(ws, "push_saved", {}); }
+        catch (e) { console.error('save_push_sub', e); }
         break;
       }
 
