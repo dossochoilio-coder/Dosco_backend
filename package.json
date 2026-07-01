@@ -1,7 +1,7 @@
 {
   "name": "dosco-backend",
   "version": "1.1.0",
-  "description": "Backend multijoueur + IAP pour DOSCO — production-ready",
+  "description": "Backend multijoueur + IAP pour DOSCO \u2014 production-ready",
   "main": "src/server.js",
   "type": "module",
   "scripts": {
@@ -12,7 +12,6 @@
   "dependencies": {
     "express": "^4.21.0",
     "jsonwebtoken": "^9.0.2",
-    "web-push": "^3.6.7",
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
