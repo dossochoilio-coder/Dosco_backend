@@ -20,7 +20,11 @@ import { rateLimit } from './rate-limit.js';
 // Web Push (notifications même app fermée) — optionnel
 let webpush = null;
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC || '';
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '61860364011-p9ur3tgrag39t7uial0f1vdmelg337re.apps.googleusercontent.com';
+// Client IDs Google autorisés (Web pour le navigateur, Android pour l'APK natif).
+// Configurables via GOOGLE_CLIENT_IDS (séparés par des virgules) sur Railway.
+const GOOGLE_CLIENT_IDS = (process.env.GOOGLE_CLIENT_IDS ||
+  '61860364011-ln662b43gi6ic4u3lsu1s77rju6l9bi4.apps.googleusercontent.com,61860364011-p9ur3tgrag39t7uial0f1vdmelg337re.apps.googleusercontent.com'
+).split(',').map(x => x.trim()).filter(Boolean);
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE || '';
 try {
   if (VAPID_PUBLIC && VAPID_PRIVATE) {
@@ -268,7 +272,7 @@ app.post('/api/oauth/google', rateLimit(20, 60000, 'oauth'), async (req, res) =>
 
     if (!payload.sub) return res.status(401).json({ error: "Token invalide" });
     // SÉCURITÉ : vérifier que le token a bien été émis POUR notre application
-    if (GOOGLE_CLIENT_ID && payload.aud !== GOOGLE_CLIENT_ID) {
+    if (GOOGLE_CLIENT_IDS.length && !GOOGLE_CLIENT_IDS.includes(payload.aud)) {
       return res.status(401).json({ error: "Token non destiné à cette application" });
     }
 
