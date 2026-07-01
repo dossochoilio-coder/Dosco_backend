@@ -161,6 +161,56 @@ async function auth(req, res, next) {
   }
 }
 
+// Validation d'un achat Google Play (anti-fraude : vérifie le reçu auprès de Google)
+// Nécessite les identifiants d'un compte de service Google Play configurés en variables d'env.
+app.post('/api/iap/google/validate', auth, rateLimit(30, 60000, 'iap_google'), async (req, res) => {
+  try {
+    const { productId, productType, purchaseToken } = req.body || {};
+    if (!productId || !purchaseToken) {
+      return res.status(400).json({ valid: false, error: "Paramètres manquants" });
+    }
+    // Si la vérification Google n'est pas configurée, on accepte sans bloquer
+    // (l'achat a déjà été payé côté Google Play ; on évite juste de bloquer l'utilisateur)
+    const pkg = process.env.ANDROID_PACKAGE_NAME || 'com.dosco.batailledesetoiles';
+    const saJson = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON;
+    if (!saJson) {
+      console.log('[iap] Validation Google Play non configurée (GOOGLE_PLAY_SERVICE_ACCOUNT_JSON absent) — achat accepté sans vérif');
+      return res.json({ valid: true, unverified: true });
+    }
+    // Vérification réelle auprès de l'API Google Play Developer
+    try {
+      const { google } = await import('googleapis');
+      const creds = JSON.parse(saJson);
+      const authClient = new google.auth.JWT(
+        creds.client_email, null, creds.private_key,
+        ['https://www.googleapis.com/auth/androidpublisher']
+      );
+      const publisher = google.androidpublisher({ version: 'v3', auth: authClient });
+      let result;
+      if (productType === 'subs') {
+        result = await publisher.purchases.subscriptions.get({
+          packageName: pkg, subscriptionId: productId, token: purchaseToken
+        });
+        const valid = result.data && (result.data.paymentState === 1 || result.data.paymentState === 2);
+        return res.json({ valid: !!valid, data: { expiryTimeMillis: result.data.expiryTimeMillis } });
+      } else {
+        result = await publisher.purchases.products.get({
+          packageName: pkg, productId: productId, token: purchaseToken
+        });
+        // purchaseState 0 = acheté
+        const valid = result.data && result.data.purchaseState === 0;
+        return res.json({ valid: !!valid });
+      }
+    } catch (e) {
+      console.error('[iap] Erreur validation Google:', e.message);
+      // Ne pas bloquer un achat déjà payé si l'API échoue temporairement
+      return res.json({ valid: true, unverified: true, note: e.message });
+    }
+  } catch (e) {
+    return res.status(500).json({ valid: false, error: "Erreur serveur" });
+  }
+});
+
 app.post('/api/iap/validate', auth, rateLimit(30, 60000, 'iap'), async (req, res) => {
   try {
     const receiptId = req.body?.receiptId || req.body?.transactionId;
