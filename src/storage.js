@@ -119,13 +119,16 @@ export async function getUserByName(name) {
 
 export async function saveUser(user) {
   if (pgPool) {
+    // Champs hors colonnes fixes → stockés dans data JSONB (oauth, googleId, provider, draws, country, email...)
+    const { uid, name, passHash, stars, rank, wins, losses, hasPass, createdAt, ...extra } = user;
     await pgPool.query(`
-      INSERT INTO users (uid,name,pass_hash,stars,rank,wins,losses,has_pass,created_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      INSERT INTO users (uid,name,pass_hash,stars,rank,wins,losses,has_pass,data,created_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
       ON CONFLICT (uid) DO UPDATE SET
-        name=$2, pass_hash=$3, stars=$4, rank=$5, wins=$6, losses=$7, has_pass=$8
+        name=$2, pass_hash=$3, stars=$4, rank=$5, wins=$6, losses=$7, has_pass=$8,
+        data = users.data || $9
     `, [user.uid, user.name, user.passHash||null, user.stars||100, user.rank||'Naine Blanche',
-        user.wins||0, user.losses||0, !!user.hasPass, user.createdAt||Date.now()]);
+        user.wins||0, user.losses||0, !!user.hasPass, JSON.stringify(extra), user.createdAt||Date.now()]);
     return user;
   }
   const users = fileLoad('users');
@@ -293,3 +296,4 @@ export async function getAllPushSubscriptions() {
 export function storageBackend() {
   return pgPool ? 'postgresql' : 'file';
 }
+
