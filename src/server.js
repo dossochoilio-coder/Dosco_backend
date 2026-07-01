@@ -12,46 +12,12 @@ import {
   initStorage, getUser, getUserByName, saveUser, deleteUser,
   getProgress, saveProgress, receiptExists, saveReceipt, storageBackend,
   getAllRegisteredUsers, addTournamentSignup, getTournamentSignups, isSignedUp,
-  savePushSubscription, getPushSubscription, getAllPushSubscriptions,
 } from './storage.js';
 import { hashPassword, verifyPassword, validateName, validatePassword } from './auth.js';
 import { rateLimit } from './rate-limit.js';
 
-// Web Push (notifications même app fermée) — optionnel
-let webpush = null;
-const VAPID_PUBLIC = process.env.VAPID_PUBLIC || '';
-// Client IDs Google autorisés (Web pour le navigateur, Android pour l'APK natif).
-// Configurables via GOOGLE_CLIENT_IDS (séparés par des virgules) sur Railway.
-const GOOGLE_CLIENT_IDS = (process.env.GOOGLE_CLIENT_IDS ||
-  '61860364011-ln662b43gi6ic4u3lsu1s77rju6l9bi4.apps.googleusercontent.com,61860364011-p9ur3tgrag39t7uial0f1vdmelg337re.apps.googleusercontent.com'
-).split(',').map(x => x.trim()).filter(Boolean);
-const VAPID_PRIVATE = process.env.VAPID_PRIVATE || '';
-try {
-  if (VAPID_PUBLIC && VAPID_PRIVATE) {
-    const mod = await import('web-push');
-    webpush = mod.default;
-    webpush.setVapidDetails('mailto:contact@dosco.app', VAPID_PUBLIC, VAPID_PRIVATE);
-    console.log('[push] Web Push activé (VAPID configuré)');
-  } else {
-    console.log('[push] VAPID non configuré — push désactivé (définir VAPID_PUBLIC/VAPID_PRIVATE)');
-  }
-} catch (e) {
-  console.log('[push] web-push indisponible:', e.message);
-}
+// (Web Push retiré — notifications in-app via WebSocket)
 
-// Envoie une notification push à un uid (si abonné)
-async function sendPushTo(uid, payload) {
-  if (!webpush) return false;
-  try {
-    const sub = await getPushSubscription(uid);
-    if (!sub) return false;
-    await webpush.sendNotification(sub, JSON.stringify(payload));
-    return true;
-  } catch (e) {
-    console.error('[push] envoi échoué pour', uid, e.message);
-    return false;
-  }
-}
 
 // Galaxies = arènes de mise (source de vérité serveur, anti-triche)
 const GALAXIES = {
@@ -358,30 +324,6 @@ app.post('/api/oauth/facebook', rateLimit(20, 60000, 'oauth'), async (req, res) 
   } catch(e) {
     console.error('oauth/facebook', e);
     res.status(500).json({ error: "Erreur serveur OAuth" });
-  }
-});
-
-app.get('/api/vapid-public', (req, res) => res.json({ key: VAPID_PUBLIC }));
-
-// Endpoint : planifier une notification de match (heure du match du tournoi)
-// Le serveur enverra un push à l'uid à l'heure indiquée.
-app.post('/api/tournament/notify', auth, async (req, res) => {
-  try {
-    const { matchTime, opponent } = req.body || {};
-    const uid = req.uid;
-    const delay = Math.max(0, (Number(matchTime) || 0) - Date.now());
-    if (delay > 0 && delay < 7 * 24 * 3600 * 1000) {
-      setTimeout(() => {
-        sendPushTo(uid, {
-          title: "🏆 Votre match commence !",
-          body: opponent ? ("Affrontez " + opponent + " maintenant.") : "C'est l'heure de votre match de tournoi.",
-          tag: "tournament-match"
-        });
-      }, delay);
-    }
-    res.json({ scheduled: true, inMs: delay });
-  } catch (e) {
-    res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
@@ -841,12 +783,7 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      case "save_push_sub": {
-        if (!uid || !msg.subscription) return;
-        try { await savePushSubscription(uid, msg.subscription); send(ws, "push_saved", {}); }
-        catch (e) { console.error('save_push_sub', e); }
-        break;
-      }
+
 
       case "chat": {
         if (!uid || !msg.gameId || !msg.text) return;
