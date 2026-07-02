@@ -446,6 +446,7 @@ function createGame(p1, p2) {
     players: { B: p1.uid, W: p2.uid },
     names: { B: p1.name, W: p2.name },
     titles: { B: p1.title || null, W: p2.title || null },
+    skins: { B: p1.skin || null, W: p2.skin || null },
     stake: p1.stake || 0,
     galaxy: p1.galaxy || "voie_lactee",
     msc: 0,
@@ -458,11 +459,11 @@ function createGame(p1, p2) {
   p2.gameId = gameId;
 
   send(p1.ws, "game_start", {
-    gameId, color: "B", opponent: p2.name, opponentTitle: p2.title || null,
+    gameId, color: "B", opponent: p2.name, opponentTitle: p2.title || null, opponentSkin: p2.skin || null,
     board: game.board, turn: "B", stake: game.stake, galaxy: game.galaxy
   });
   send(p2.ws, "game_start", {
-    gameId, color: "W", opponent: p1.name, opponentTitle: p1.title || null,
+    gameId, color: "W", opponent: p1.name, opponentTitle: p1.title || null, opponentSkin: p1.skin || null,
     board: game.board, turn: "B", stake: game.stake, galaxy: game.galaxy
   });
   return game;
@@ -616,7 +617,8 @@ wss.on('connection', (ws) => {
         }
 
         const playerTitle = (typeof msg.title === "string" && msg.title.length <= 40) ? msg.title : null;
-        const me = { uid, name: user.name, title: playerTitle, ws, stake, galaxy: galaxyId };
+        const playerSkin = (typeof msg.skin === "string" && msg.skin.length <= 40) ? msg.skin : null;
+        const me = { uid, name: user.name, title: playerTitle, skin: playerSkin, ws, stake, galaxy: galaxyId };
         const idx = waitingQueue.findIndex(p => p.uid !== uid && p.galaxy === galaxyId);
 
         if (idx >= 0) {
@@ -754,6 +756,7 @@ wss.on('connection', (ws) => {
               uid: game.players.B,
               name: game.names.B,
               title: game.titles ? game.titles.B : null,
+              skin: game.skins ? game.skins.B : null,
               ws: playerSockets.get(game.players.B),
               stake: game.stake,
               galaxy: game.galaxy
@@ -762,6 +765,7 @@ wss.on('connection', (ws) => {
               uid: game.players.W,
               name: game.names.W,
               title: game.titles ? game.titles.W : null,
+              skin: game.skins ? game.skins.W : null,
               ws: playerSockets.get(game.players.W),
               stake: game.stake,
               galaxy: game.galaxy
