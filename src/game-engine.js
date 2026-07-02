@@ -80,12 +80,14 @@ export function isLegalMove(board, from, to, color){
 }
 
 export function checkEnd(board, lastMove, color, msc){
-  const opp = color==="W"?"B":"W";
-  let wCount=0, bCount=0;
-  for(const s of Object.values(board)){ if(s.color==="W")wCount++; else bCount++; }
-  // Élimination
-  if(wCount===0) return {winner:"B", type:"elimination"};
-  if(bCount===0) return {winner:"W", type:"elimination"};
+  if(!board || typeof board !== "object") return null;
+  let wCount=0, bCount=0, total=0;
+  for(const s of Object.values(board)){ if(!s) continue; total++; if(s.color==="W")wCount++; else if(s.color==="B")bCount++; }
+  // Plateau vide/incohérent : ne jamais déclarer de victoire (évite les fausses éliminations)
+  if(total===0) return null;
+  // Élimination (une vraie élimination laisse au moins une pièce au gagnant)
+  if(wCount===0 && bCount>0) return {winner:"B", type:"elimination"};
+  if(bCount===0 && wCount>0) return {winner:"W", type:"elimination"};
   // Infiltration : blanc atteint D9, bleu atteint D1
   if(lastMove==="D9" && board["D9"]?.color==="W") return {winner:"W", type:"infiltration"};
   if(lastMove==="D1" && board["D1"]?.color==="B") return {winner:"B", type:"infiltration"};
