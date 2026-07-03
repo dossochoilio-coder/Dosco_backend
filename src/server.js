@@ -453,18 +453,24 @@ function createGame(p1, p2) {
     moveCount: 0,
     lastMove: null,
     startedAt: Date.now(),
+    timeB: 300,          // temps restant Bleus (secondes) — autorité serveur
+    timeW: 300,          // temps restant Blancs (secondes)
+    turnStartedAt: Date.now(), // horodatage du début du tour courant
   };
   games.set(gameId, game);
   p1.gameId = gameId;
   p2.gameId = gameId;
 
+  console.log(`[game_start] ${gameId} | B="${p1.name}" (titre:${p1.title||"—"}) vs W="${p2.name}" (titre:${p2.title||"—"})`);
   send(p1.ws, "game_start", {
     gameId, color: "B", opponent: p2.name, opponentTitle: p2.title || null, opponentSkin: p2.skin || null,
-    board: game.board, turn: "B", stake: game.stake, galaxy: game.galaxy
+    board: game.board, turn: "B", stake: game.stake, galaxy: game.galaxy,
+    timeB: game.timeB, timeW: game.timeW, serverNow: Date.now()
   });
   send(p2.ws, "game_start", {
     gameId, color: "W", opponent: p1.name, opponentTitle: p1.title || null, opponentSkin: p1.skin || null,
-    board: game.board, turn: "B", stake: game.stake, galaxy: game.galaxy
+    board: game.board, turn: "B", stake: game.stake, galaxy: game.galaxy,
+    timeB: game.timeB, timeW: game.timeW, serverNow: Date.now()
   });
   return game;
 }
@@ -487,6 +493,14 @@ function handleMove(ws, uid, { gameId, from, to }) {
   game.lastMove = to;
   game.moveCount++;
 
+  // ── CHRONO AUTORITAIRE SERVEUR ──
+  // Décompter le temps réellement consommé par le joueur qui vient de jouer.
+  const nowTs = Date.now();
+  const elapsedSec = Math.max(0, Math.round((nowTs - game.turnStartedAt) / 1000));
+  if (color === "B") game.timeB = Math.max(0, game.timeB - elapsedSec);
+  else game.timeW = Math.max(0, game.timeW - elapsedSec);
+  game.turnStartedAt = nowTs; // le tour de l'adversaire commence maintenant
+
   const end = checkEnd(game.board, to, color, game.msc);
   const nextTurn = color === "B" ? "W" : "B";
   game.turn = nextTurn;
@@ -494,7 +508,8 @@ function handleMove(ws, uid, { gameId, from, to }) {
   const p1ws = playerSockets.get(game.players.B);
   const p2ws = playerSockets.get(game.players.W);
 
-  const moveData = { gameId, from, to, isCapture, board: game.board, turn: nextTurn, by: color };
+  const moveData = { gameId, from, to, isCapture, board: game.board, turn: nextTurn, by: color,
+    timeB: game.timeB, timeW: game.timeW, serverNow: nowTs };
   if (p1ws) send(p1ws, "move", moveData);
   if (p2ws) send(p2ws, "move", moveData);
 
@@ -881,6 +896,7 @@ wss.on('connection', (ws) => {
         for (const [gid, game] of games) {
           if (game.players.B === disconnectedUid || game.players.W === disconnectedUid) {
             const winner = game.players.B === disconnectedUid ? "W" : "B";
+            console.log(`[disconnect-forfait] ${gid} | ${disconnectedUid} absent 30s → victoire ${winner}`);
             settleStakes(game, winner).catch(e => console.error('settle', e));
             const endData = { gameId: gid, winner, endType: "disconnect", stake: game.stake };
             const oppWs = playerSockets.get(game.players[winner]);
@@ -892,7 +908,7 @@ wss.on('connection', (ws) => {
             games.delete(gid);
           }
         }
-      }, 12000); // 12 secondes de grâce
+      }, 30000); // 30 secondes de grâce (réduit les faux forfaits sur coupures mobiles)
     }
   });
 });
@@ -901,6 +917,7 @@ wss.on('connection', (ws) => {
 initStorage().then(() => {
   server.listen(PORT, () => {
     console.log(`🌌 DOSCO backend sur le port ${PORT}`);
+    console.log(`✅ VERSION 2026-07-02-B : nom+titre adversaire + checkEnd protégé + timer sync`);
     console.log(` Stockage: ${storageBackend()}`);
     console.log(` WebSocket: ws://localhost:${PORT}`);
     console.log(` REST API: http://localhost:${PORT}/api`);
