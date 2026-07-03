@@ -18,6 +18,47 @@ import { rateLimit } from './rate-limit.js';
 
 // (Web Push retiré — notifications in-app via WebSocket)
 
+// ════════════════════════════════════════════
+// VERSIONS DE L'APPLICATION (mise à jour automatique)
+// ════════════════════════════════════════════
+// Quand tu publies une nouvelle version sur Google Play, mets à jour ces valeurs
+// et redéploie le backend. Les apps plus anciennes détecteront la MAJ.
+const APP_VERSION_INFO = {
+  latest: "1.0.0",      // dernière version publiée sur le Store
+  minimum: "1.0.0",     // version minimale acceptée (en dessous = MAJ obligatoire)
+  androidPackage: "com.dosco.bataille.etoiles",
+  storeUrl: "https://play.google.com/store/apps/details?id=com.dosco.bataille.etoiles",
+  // Message optionnel affiché à l'utilisateur (null = message par défaut côté client)
+  message: null
+};
+
+// Compare deux versions "x.y.z". Retourne -1, 0 ou 1.
+function compareVersions(a, b) {
+  const pa = String(a || "0").split(".").map(n => parseInt(n, 10) || 0);
+  const pb = String(b || "0").split(".").map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x < y) return -1;
+    if (x > y) return 1;
+  }
+  return 0;
+}
+
+// Évalue l'état de mise à jour pour une version cliente donnée.
+function evaluateUpdate(clientVersion) {
+  const cv = clientVersion || "0.0.0";
+  const outdated = compareVersions(cv, APP_VERSION_INFO.latest) < 0;
+  const mandatory = compareVersions(cv, APP_VERSION_INFO.minimum) < 0;
+  return {
+    current: cv,
+    latest: APP_VERSION_INFO.latest,
+    updateAvailable: outdated,
+    mandatory: mandatory,
+    storeUrl: APP_VERSION_INFO.storeUrl,
+    message: APP_VERSION_INFO.message
+  };
+}
+
 
 // Galaxies = arènes de mise (source de vérité serveur, anti-triche)
 const GALAXIES = {
@@ -377,6 +418,13 @@ app.post('/api/oauth/facebook', rateLimit(20, 60000, 'oauth'), async (req, res) 
   }
 });
 
+// Endpoint public de version : l'app interroge pour savoir si une MAJ existe.
+// Usage : GET /api/version?v=1.0.0  (v = version actuelle de l'app)
+app.get('/api/version', (req, res) => {
+  const clientVersion = (typeof req.query.v === "string") ? req.query.v : "0.0.0";
+  res.json(evaluateUpdate(clientVersion));
+});
+
 app.get('/health', (req, res) => res.json({
   status: "ok",
   backend: storageBackend(),
@@ -589,7 +637,7 @@ wss.on('connection', (ws) => {
           }
           playerSockets.set(uid, ws);
           ws.uid = uid;
-          send(ws, "authed", { uid });
+          send(ws, "authed", { uid, version: evaluateUpdate(msg.appVersion || "0.0.0") });
           // Livrer un game_end en attente (si le client s'était déconnecté avant de le recevoir)
           const pendingEnd = pendingGameEnds.get(uid);
           if (pendingEnd && (Date.now() - pendingEnd.ts) < 5 * 60 * 1000) {
@@ -609,12 +657,18 @@ wss.on('connection', (ws) => {
             if (g.players.B === uid || g.players.W === uid) {
               const myColor = g.players.B === uid ? "B" : "W";
               const oppColor = myColor === "B" ? "W" : "B";
-              // Recalculer le temps restant du joueur actif au moment de la reprise
               const nowTs = Date.now();
-              const elapsedSec = Math.max(0, Math.round((nowTs - g.turnStartedAt) / 1000));
-              let tB = g.timeB, tW = g.timeW;
-              if (g.turn === "B") tB = Math.max(0, g.timeB - elapsedSec);
-              else tW = Math.max(0, g.timeW - elapsedSec);
+              // Lever la pause : le chrono du joueur actif redémarre maintenant.
+              // (le temps consommé avant la coupure a déjà été retiré au moment de la pause)
+              if (g.pausedFor) {
+                g.pausedFor = null;
+                g.pausedAt = null;
+                g.turnStartedAt = nowTs; // redémarrer le décompte du tour courant à la reprise
+              }
+              const tB = g.timeB, tW = g.timeW;
+              // Prévenir l'adversaire que le joueur est revenu
+              const oppWsR = playerSockets.get(g.players[oppColor]);
+              if (oppWsR) send(oppWsR, "opponent_reconnected", { gameId: gid });
               console.log(`[game_resume] ${gid} | ${uid} reprend la partie (couleur ${myColor})`);
               send(ws, "game_resume", {
                 gameId: gid,
@@ -924,31 +978,53 @@ wss.on('connection', (ws) => {
       const i = waitingQueue.findIndex(p => p.uid === uid);
       if (i >= 0) waitingQueue.splice(i, 1);
 
-      // DÉLAI DE GRÂCE : ne pas déclarer forfait immédiatement (micro-coupures mobiles fréquentes)
       const disconnectedUid = uid;
+
+      // Si le joueur est dans une partie active : mettre EN PAUSE (geler son chrono)
+      // et prévenir l'adversaire, plutôt que de déclarer forfait tout de suite.
+      for (const [gid, game] of games) {
+        if (game.players.B === disconnectedUid || game.players.W === disconnectedUid) {
+          const dcColor = game.players.B === disconnectedUid ? "B" : "W";
+          // Marquer la pause et figer le décompte : on retient le temps déjà consommé du tour courant
+          if (!game.pausedFor) {
+            game.pausedFor = dcColor;
+            game.pausedAt = Date.now();
+            // Si c'était au tour du joueur déconnecté, figer son chrono en retirant le temps déjà écoulé
+            if (game.turn === dcColor) {
+              const elapsed = Math.max(0, Math.round((Date.now() - game.turnStartedAt) / 1000));
+              if (dcColor === "B") game.timeB = Math.max(0, game.timeB - elapsed);
+              else game.timeW = Math.max(0, game.timeW - elapsed);
+            }
+          }
+          const oppColor = dcColor === "B" ? "W" : "B";
+          const oppWs = playerSockets.get(game.players[oppColor]);
+          if (oppWs) send(oppWs, "opponent_disconnected", { gameId: gid, graceMs: 90000 });
+          console.log(`[pause] ${gid} | ${disconnectedUid} (${dcColor}) déconnecté → partie en pause (90s)`);
+        }
+      }
+
+      // DÉLAI DE GRÂCE ÉTENDU : 90s pour absorber les coupures 4G/mobiles.
       setTimeout(() => {
-        // Si le joueur s'est reconnecté entre-temps, son socket est de nouveau dans playerSockets
         const reconnected = playerSockets.has(disconnectedUid);
         if (reconnected) {
-          return;
+          return; // le joueur est revenu → game_resume déjà envoyé à l'auth
         }
-        // Toujours absent après le délai → forfait
+        // Toujours absent après 90s → forfait légitime
         for (const [gid, game] of games) {
           if (game.players.B === disconnectedUid || game.players.W === disconnectedUid) {
             const winner = game.players.B === disconnectedUid ? "W" : "B";
-            console.log(`[disconnect-forfait] ${gid} | ${disconnectedUid} absent 30s → victoire ${winner}`);
+            console.log(`[disconnect-forfait] ${gid} | ${disconnectedUid} absent 90s → victoire ${winner}`);
             settleStakes(game, winner).catch(e => console.error('settle', e));
             const endData = { gameId: gid, winner, endType: "disconnect", stake: game.stake };
             const oppWs = playerSockets.get(game.players[winner]);
             if (oppWs) send(oppWs, "game_end", endData);
-            // Bufferiser pour les deux (au cas où l'adversaire aussi se reconnecte)
             pendingGameEnds.set(game.players.B, { endData, ts: Date.now() });
             pendingGameEnds.set(game.players.W, { endData, ts: Date.now() });
             cacheEndedGame(game);
             games.delete(gid);
           }
         }
-      }, 30000); // 30 secondes de grâce (réduit les faux forfaits sur coupures mobiles)
+      }, 90000); // 90 secondes de grâce
     }
   });
 });
@@ -957,7 +1033,7 @@ wss.on('connection', (ws) => {
 initStorage().then(() => {
   server.listen(PORT, () => {
     console.log(`🌌 DOSCO backend sur le port ${PORT}`);
-    console.log(`✅ VERSION 2026-07-03-C : vrai pseudo + reprise partie (reconnexion) + timer sync`);
+    console.log(`✅ VERSION 2026-07-03-E : MAJ auto (Play Store) + pause 90s + reprise partie`);
     console.log(` Stockage: ${storageBackend()}`);
     console.log(` WebSocket: ws://localhost:${PORT}`);
     console.log(` REST API: http://localhost:${PORT}/api`);
