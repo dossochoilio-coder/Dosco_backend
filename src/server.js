@@ -111,16 +111,18 @@ async function persistUser(user) {
 
 app.post('/api/register', rateLimit(10, 60000, 'register'), async (req, res) => {
   try {
-    const { name, password } = req.body || {};
+    const { name, password, country } = req.body || {};
     if (!validateName(name)) return res.status(400).json({ error: "Pseudo invalide (2-14 caractères)" });
     if (!validatePassword(password)) return res.status(400).json({ error: "Mot de passe invalide (min. 6 caractères)" });
     if (await getUserByName(name.trim())) return res.status(409).json({ error: "Ce pseudo est déjà pris" });
 
     const uid = "usr_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    const safeCountry = (typeof country === "string" && /^[A-Z]{2}$/.test(country)) ? country : "XX";
     const user = {
       uid,
       name: name.trim(),
       passHash: hashPassword(password),
+      country: safeCountry,
       stars: 100,
       rank: "Naine Blanche",
       wins: 0,
@@ -723,10 +725,12 @@ wss.on('connection', (ws) => {
         // Évite le nom générique "Joueur" et garde la base à jour.
         const clientName = (typeof msg.name === "string" && msg.name.trim().length >= 2 && msg.name.trim().length <= 20) ? msg.name.trim() : null;
         const effectiveName = clientName || user.name || "Joueur";
-        if (clientName && clientName !== user.name) {
-          user.name = clientName;
-          persistUser(user).catch(() => {});
-        }
+        const clientCountry = (typeof msg.country === "string" && /^[A-Z]{2}$/.test(msg.country)) ? msg.country : null;
+        let userChanged = false;
+        if (clientName && clientName !== user.name) { user.name = clientName; userChanged = true; }
+        // Renseigner le pays s'il est absent/inconnu en base (permet le classement national)
+        if (clientCountry && (!user.country || user.country === "XX")) { user.country = clientCountry; userChanged = true; }
+        if (userChanged) persistUser(user).catch(() => {});
         const me = { uid, name: effectiveName, title: playerTitle, skin: playerSkin, ws, stake, galaxy: galaxyId };
         const idx = waitingQueue.findIndex(p => p.uid !== uid && p.galaxy === galaxyId);
 
@@ -897,10 +901,12 @@ wss.on('connection', (ws) => {
       }
 
       case "get_leaderboard": {
-        // Classement RÉEL : comptes enregistrés uniquement, min. 10 matchs, trié par % victoires
+        // Classement RÉEL : comptes enregistrés, min. 10 matchs, trié par % de victoires.
+        // Renvoie le top 10 mondial + top 10 national + la position du joueur courant.
         try {
           const users = await getAllRegisteredUsers();
-          const ranked = users
+          // Construire la liste éligible (≥ 10 parties jouées)
+          const eligible = users
             .map(u => {
               const total = (u.wins||0) + (u.losses||0) + (u.draws||0);
               const decisive = (u.wins||0) + (u.losses||0);
@@ -909,13 +915,49 @@ wss.on('connection', (ws) => {
                        draws: u.draws||0, total, winPct, country: u.country||'XX',
                        pts: winPct, score: winPct };
             })
-            .filter(u => u.total >= 10)          // min. 10 matchs
-            .sort((a, b) => b.winPct - a.winPct || b.wins - a.wins)
-            .slice(0, Number(msg.limit) || 50);
-          send(ws, "leaderboard", { players: ranked });
+            .filter(u => u.total >= 10);
+
+          // Tri : % de victoires décroissant, départage par nombre de victoires puis moins de défaites
+          const sortFn = (a, b) => (b.winPct - a.winPct) || (b.wins - a.wins) || (a.losses - b.losses);
+
+          // Classement MONDIAL
+          const world = eligible.slice().sort(sortFn);
+          const worldTop = world.slice(0, 10).map((u, i) => ({ ...u, rank: i + 1 }));
+
+          // Récupérer le joueur courant et son pays
+          const meUser = uid ? await loadUser(uid) : null;
+          const myCountry = (meUser && meUser.country) || 'XX';
+
+          // Position du joueur courant dans le classement mondial
+          let myWorld = null;
+          const myWorldIdx = world.findIndex(u => u.id === uid);
+          if (myWorldIdx >= 0) {
+            myWorld = { ...world[myWorldIdx], rank: myWorldIdx + 1 };
+          }
+
+          // Classement NATIONAL (même pays que le joueur courant)
+          const national = eligible.filter(u => (u.country||'XX') === myCountry).sort(sortFn);
+          const nationalTop = national.slice(0, 10).map((u, i) => ({ ...u, rank: i + 1 }));
+          let myNational = null;
+          const myNatIdx = national.findIndex(u => u.id === uid);
+          if (myNatIdx >= 0) {
+            myNational = { ...national[myNatIdx], rank: myNatIdx + 1 };
+          }
+
+          send(ws, "leaderboard", {
+            players: worldTop,                 // compat : ancien champ = top mondial
+            world: worldTop,
+            national: nationalTop,
+            myCountry: myCountry,
+            me: {
+              world: myWorld,                  // {rank, winPct, wins...} ou null si < 10 matchs
+              national: myNational
+            },
+            totals: { world: world.length, national: national.length }
+          });
         } catch (e) {
           console.error('get_leaderboard', e);
-          send(ws, "leaderboard", { players: [] });
+          send(ws, "leaderboard", { players: [], world: [], national: [], me: { world: null, national: null } });
         }
         break;
       }
@@ -1033,7 +1075,7 @@ wss.on('connection', (ws) => {
 initStorage().then(() => {
   server.listen(PORT, () => {
     console.log(`🌌 DOSCO backend sur le port ${PORT}`);
-    console.log(`✅ VERSION 2026-07-03-E : MAJ auto (Play Store) + pause 90s + reprise partie`);
+    console.log(`✅ VERSION 2026-07-03-F : classement mondial+national + MAJ auto + reprise partie`);
     console.log(` Stockage: ${storageBackend()}`);
     console.log(` WebSocket: ws://localhost:${PORT}`);
     console.log(` REST API: http://localhost:${PORT}/api`);
