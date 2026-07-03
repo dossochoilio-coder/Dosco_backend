@@ -602,6 +602,38 @@ wss.on('connection', (ws) => {
             send(ws, "rematch_offered", { gameId: pending.gameId, from: pending.fromUid, fromName: pending.fromName });
             pendingRematches.delete(uid);
           }
+          // ── RESTAURATION DE PARTIE ACTIVE ──
+          // Si le joueur est encore dans une partie en cours (reconnexion après coupure),
+          // lui renvoyer l'état complet pour qu'il reprenne là où il en était (évite l'écran figé).
+          for (const [gid, g] of games) {
+            if (g.players.B === uid || g.players.W === uid) {
+              const myColor = g.players.B === uid ? "B" : "W";
+              const oppColor = myColor === "B" ? "W" : "B";
+              // Recalculer le temps restant du joueur actif au moment de la reprise
+              const nowTs = Date.now();
+              const elapsedSec = Math.max(0, Math.round((nowTs - g.turnStartedAt) / 1000));
+              let tB = g.timeB, tW = g.timeW;
+              if (g.turn === "B") tB = Math.max(0, g.timeB - elapsedSec);
+              else tW = Math.max(0, g.timeW - elapsedSec);
+              console.log(`[game_resume] ${gid} | ${uid} reprend la partie (couleur ${myColor})`);
+              send(ws, "game_resume", {
+                gameId: gid,
+                color: myColor,
+                opponent: g.names[oppColor],
+                opponentTitle: g.titles ? g.titles[oppColor] : null,
+                opponentSkin: g.skins ? g.skins[oppColor] : null,
+                board: g.board,
+                turn: g.turn,
+                stake: g.stake,
+                galaxy: g.galaxy,
+                lastMove: g.lastMove,
+                timeB: tB,
+                timeW: tW,
+                serverNow: nowTs
+              });
+              break;
+            }
+          }
         } catch (e) {
           send(ws, "error", { msg: "Auth WS échouée" });
         }
@@ -633,7 +665,15 @@ wss.on('connection', (ws) => {
 
         const playerTitle = (typeof msg.title === "string" && msg.title.length <= 40) ? msg.title : null;
         const playerSkin = (typeof msg.skin === "string" && msg.skin.length <= 40) ? msg.skin : null;
-        const me = { uid, name: user.name, title: playerTitle, skin: playerSkin, ws, stake, galaxy: galaxyId };
+        // Nom prioritaire : celui envoyé par le client (vrai pseudo), sinon celui en base.
+        // Évite le nom générique "Joueur" et garde la base à jour.
+        const clientName = (typeof msg.name === "string" && msg.name.trim().length >= 2 && msg.name.trim().length <= 20) ? msg.name.trim() : null;
+        const effectiveName = clientName || user.name || "Joueur";
+        if (clientName && clientName !== user.name) {
+          user.name = clientName;
+          persistUser(user).catch(() => {});
+        }
+        const me = { uid, name: effectiveName, title: playerTitle, skin: playerSkin, ws, stake, galaxy: galaxyId };
         const idx = waitingQueue.findIndex(p => p.uid !== uid && p.galaxy === galaxyId);
 
         if (idx >= 0) {
@@ -917,7 +957,7 @@ wss.on('connection', (ws) => {
 initStorage().then(() => {
   server.listen(PORT, () => {
     console.log(`🌌 DOSCO backend sur le port ${PORT}`);
-    console.log(`✅ VERSION 2026-07-02-B : nom+titre adversaire + checkEnd protégé + timer sync`);
+    console.log(`✅ VERSION 2026-07-03-C : vrai pseudo + reprise partie (reconnexion) + timer sync`);
     console.log(` Stockage: ${storageBackend()}`);
     console.log(` WebSocket: ws://localhost:${PORT}`);
     console.log(` REST API: http://localhost:${PORT}/api`);
