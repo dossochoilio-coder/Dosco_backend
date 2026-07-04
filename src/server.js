@@ -111,18 +111,23 @@ async function persistUser(user) {
 
 app.post('/api/register', rateLimit(10, 60000, 'register'), async (req, res) => {
   try {
-    const { name, password, country } = req.body || {};
+    const { name, password, country, secretQuestion, secretAnswer } = req.body || {};
     if (!validateName(name)) return res.status(400).json({ error: "Pseudo invalide (2-14 caractères)" });
     if (!validatePassword(password)) return res.status(400).json({ error: "Mot de passe invalide (min. 6 caractères)" });
     if (await getUserByName(name.trim())) return res.status(409).json({ error: "Ce pseudo est déjà pris" });
 
     const uid = "usr_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
     const safeCountry = (typeof country === "string" && /^[A-Z]{2}$/.test(country)) ? country : "XX";
+    // Question secrète (pour la récupération de mot de passe) : réponse hachée, jamais en clair
+    const sQuestion = (typeof secretQuestion === "string" && secretQuestion.trim().length >= 1 && secretQuestion.trim().length <= 100) ? secretQuestion.trim() : null;
+    const sAnswer = (typeof secretAnswer === "string" && secretAnswer.trim().length >= 2) ? secretAnswer.trim().toLowerCase() : null;
     const user = {
       uid,
       name: name.trim(),
       passHash: hashPassword(password),
       country: safeCountry,
+      secretQuestion: sQuestion,
+      secretAnswerHash: sAnswer ? hashPassword(sAnswer) : null,
       stars: 100,
       rank: "Naine Blanche",
       wins: 0,
@@ -158,6 +163,55 @@ app.post('/api/login', rateLimit(10, 60000, 'login'), async (req, res) => {
     res.json({ token, user: safe });
   } catch (e) {
     console.error('login', e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ── RÉCUPÉRATION DE MOT DE PASSE PAR QUESTION SECRÈTE ──
+
+// 1) Récupérer la question secrète d'un compte (pour l'afficher au joueur)
+app.post('/api/forgot/question', rateLimit(10, 60000, 'forgot-q'), async (req, res) => {
+  try {
+    const { name } = req.body || {};
+    if (!name) return res.status(400).json({ error: "Pseudo requis" });
+    const user = await getUserByName(name.trim());
+    // Réponse volontairement neutre si le compte n'existe pas ou n'a pas de question
+    // (évite de révéler quels pseudos existent)
+    if (!user || !user.secretQuestion || !user.secretAnswerHash) {
+      return res.status(404).json({ error: "Aucune question secrète pour ce compte. Récupération impossible." });
+    }
+    res.json({ question: user.secretQuestion });
+  } catch (e) {
+    console.error('forgot/question', e);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// 2) Vérifier la réponse et définir un nouveau mot de passe
+app.post('/api/forgot/reset', rateLimit(5, 60000, 'forgot-reset'), async (req, res) => {
+  try {
+    const { name, answer, newPassword } = req.body || {};
+    if (!name || !answer || !newPassword) return res.status(400).json({ error: "Champs manquants" });
+    if (!validatePassword(newPassword)) return res.status(400).json({ error: "Mot de passe invalide (min. 6 caractères)" });
+    const user = await getUserByName(name.trim());
+    if (!user || !user.secretAnswerHash) {
+      return res.status(404).json({ error: "Récupération impossible pour ce compte." });
+    }
+    const ok = verifyPassword(String(answer).trim().toLowerCase(), user.secretAnswerHash);
+    if (!ok) {
+      console.log(`[forgot-reset] échec réponse secrète pour ${user.name}`);
+      return res.status(401).json({ error: "Réponse incorrecte." });
+    }
+    // Réponse correcte → définir le nouveau mot de passe
+    user.passHash = hashPassword(newPassword);
+    await persistUser(user);
+    console.log(`[forgot-reset] mot de passe réinitialisé pour ${user.name}`);
+    // Connecter directement l'utilisateur
+    const token = jwt.sign({ uid: user.uid }, JWT_SECRET, { expiresIn: '30d' });
+    const { passHash, secretAnswerHash, ...safe } = user;
+    res.json({ success: true, token, user: safe });
+  } catch (e) {
+    console.error('forgot/reset', e);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
@@ -918,6 +972,10 @@ wss.on('connection', (ws) => {
         // Renvoie le top 10 mondial + top 10 national + la position du joueur courant.
         try {
           const users = await getAllRegisteredUsers();
+          try {
+            console.log(`[leaderboard-debug] ${users.length} compte(s) enregistré(s):`,
+              users.map(u => { const t=(u.wins||0)+(u.losses||0)+(u.draws||0); return `${u.name}(${u.wins||0}V/${u.losses||0}D/${u.draws||0}N=${t}pj)${t>=5?"[OK]":"[<5→exclu]"}`; }).join(", "));
+          } catch(e) {}
           // Construire la liste éligible (≥ 10 parties jouées)
           const eligible = users
             .map(u => {
@@ -1093,7 +1151,7 @@ wss.on('connection', (ws) => {
 initStorage().then(() => {
   server.listen(PORT, () => {
     console.log(`🌌 DOSCO backend sur le port ${PORT}`);
-    console.log(`✅ VERSION 2026-07-04-C : login serveur-first (compte survit à la réinstallation) + classement`);
+    console.log(`✅ VERSION 2026-07-04-D : question secrète (récup mdp) + diag classement + login serveur-first`);
     console.log(` Stockage: ${storageBackend()}`);
     console.log(` WebSocket: ws://localhost:${PORT}`);
     console.log(` REST API: http://localhost:${PORT}/api`);
