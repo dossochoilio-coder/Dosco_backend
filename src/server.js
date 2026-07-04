@@ -1093,7 +1093,7 @@ wss.on('connection', (ws) => {
 initStorage().then(() => {
   server.listen(PORT, () => {
     console.log(`🌌 DOSCO backend sur le port ${PORT}`);
-    console.log(`✅ VERSION 2026-07-04-B : fix requête classement (get_leaderboard) + anti-faux-classement`);
+    console.log(`✅ VERSION 2026-07-04-C : login serveur-first (compte survit à la réinstallation) + classement`);
     console.log(` Stockage: ${storageBackend()}`);
     console.log(` WebSocket: ws://localhost:${PORT}`);
     console.log(` REST API: http://localhost:${PORT}/api`);
