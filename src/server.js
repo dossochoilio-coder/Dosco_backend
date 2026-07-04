@@ -305,6 +305,19 @@ app.post('/api/sync/push', auth, rateLimit(60, 60000, 'sync'), async (req, res) 
       };
     }
     await saveProgress(req.user.uid, mergedSeason, inventory);
+    // Synchroniser les étoiles ET le pays vers la table users (pour le classement)
+    try {
+      const u = await loadUser(req.user.uid);
+      if (u) {
+        let changed = false;
+        const newStars = mergedSeason && typeof mergedSeason.stars === "number" ? mergedSeason.stars : null;
+        if (newStars !== null && newStars !== u.stars) { u.stars = newStars; changed = true; }
+        if (mergedSeason && typeof mergedSeason.wins === "number" && mergedSeason.wins > (u.wins||0)) { u.wins = mergedSeason.wins; changed = true; }
+        if (mergedSeason && typeof mergedSeason.losses === "number" && mergedSeason.losses > (u.losses||0)) { u.losses = mergedSeason.losses; changed = true; }
+        if (mergedSeason && typeof mergedSeason.country === "string" && /^[A-Z]{2}$/.test(mergedSeason.country) && (!u.country || u.country === "XX")) { u.country = mergedSeason.country; changed = true; }
+        if (changed) await persistUser(u);
+      }
+    } catch (e) { /* le classement se mettra à jour au prochain sync */ }
     res.json({ success: true, ts: Date.now() });
   } catch (e) {
     res.status(500).json({ error: "Erreur de synchronisation" });
@@ -901,7 +914,7 @@ wss.on('connection', (ws) => {
       }
 
       case "get_leaderboard": {
-        // Classement RÉEL : comptes enregistrés, min. 10 matchs, trié par % de victoires.
+        // Classement RÉEL : comptes enregistrés, min. 5 matchs, trié par % de victoires.
         // Renvoie le top 10 mondial + top 10 national + la position du joueur courant.
         try {
           const users = await getAllRegisteredUsers();
@@ -911,11 +924,11 @@ wss.on('connection', (ws) => {
               const total = (u.wins||0) + (u.losses||0) + (u.draws||0);
               const decisive = (u.wins||0) + (u.losses||0);
               const winPct = decisive > 0 ? Math.round((u.wins / decisive) * 100) : 0;
-              return { id: u.uid, name: u.name, wins: u.wins||0, losses: u.losses||0,
+              return { id: u.uid, name: u.name, stars: u.stars||0, wins: u.wins||0, losses: u.losses||0,
                        draws: u.draws||0, total, winPct, country: u.country||'XX',
                        pts: winPct, score: winPct };
             })
-            .filter(u => u.total >= 10);
+            .filter(u => u.total >= 5);
 
           // Tri : % de victoires décroissant, départage par nombre de victoires puis moins de défaites
           const sortFn = (a, b) => (b.winPct - a.winPct) || (b.wins - a.wins) || (a.losses - b.losses);
@@ -1075,7 +1088,7 @@ wss.on('connection', (ws) => {
 initStorage().then(() => {
   server.listen(PORT, () => {
     console.log(`🌌 DOSCO backend sur le port ${PORT}`);
-    console.log(`✅ VERSION 2026-07-03-F : classement mondial+national + MAJ auto + reprise partie`);
+    console.log(`✅ VERSION 2026-07-03-H : classement par % victoires (seuil 5 parties)`);
     console.log(` Stockage: ${storageBackend()}`);
     console.log(` WebSocket: ws://localhost:${PORT}`);
     console.log(` REST API: http://localhost:${PORT}/api`);
