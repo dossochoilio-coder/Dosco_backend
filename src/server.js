@@ -929,6 +929,11 @@ wss.on('connection', (ws) => {
                        pts: winPct, score: winPct };
             })
             .filter(u => u.total >= 5);
+          // DIAGNOSTIC : afficher les stats réelles utilisées pour le classement
+          try {
+            console.log(`[leaderboard] ${eligible.length} joueur(s) éligible(s) (≥5 parties):`,
+              eligible.map(u => `${u.name}=${u.winPct}%(${u.wins}V/${u.losses}D,${u.total}pj)`).join(", "));
+          } catch(e) {}
 
           // Tri : % de victoires décroissant, départage par nombre de victoires puis moins de défaites
           const sortFn = (a, b) => (b.winPct - a.winPct) || (b.wins - a.wins) || (a.losses - b.losses);
@@ -1088,7 +1093,7 @@ wss.on('connection', (ws) => {
 initStorage().then(() => {
   server.listen(PORT, () => {
     console.log(`🌌 DOSCO backend sur le port ${PORT}`);
-    console.log(`✅ VERSION 2026-07-03-H : classement par % victoires (seuil 5 parties)`);
+    console.log(`✅ VERSION 2026-07-04-B : fix requête classement (get_leaderboard) + anti-faux-classement`);
     console.log(` Stockage: ${storageBackend()}`);
     console.log(` WebSocket: ws://localhost:${PORT}`);
     console.log(` REST API: http://localhost:${PORT}/api`);
