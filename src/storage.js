@@ -152,10 +152,10 @@ export async function deleteUser(uid) {
 export async function getAllRegisteredUsers() {
   if (pgPool) {
     const r = await pgPool.query(
-      "SELECT uid, name, wins, losses, data FROM users WHERE pass_hash IS NOT NULL OR (data->>'oauth') IS NOT NULL"
+      "SELECT uid, name, stars, wins, losses, data FROM users WHERE pass_hash IS NOT NULL OR (data->>'oauth') IS NOT NULL"
     );
     return r.rows.map(u => ({
-      uid: u.uid, name: u.name, wins: u.wins||0, losses: u.losses||0,
+      uid: u.uid, name: u.name, stars: u.stars||0, wins: u.wins||0, losses: u.losses||0,
       draws: (u.data && u.data.draws) || 0,
       country: (u.data && u.data.country) || 'XX'
     }));
@@ -163,7 +163,7 @@ export async function getAllRegisteredUsers() {
   const users = fileLoad('users');
   return Object.values(users)
     .filter(u => u && !u.guest && (u.passHash || u.oauth))
-    .map(u => ({ uid:u.uid, name:u.name, wins:u.wins||0, losses:u.losses||0, draws:u.draws||0, country:u.country||'XX' }));
+    .map(u => ({ uid:u.uid, name:u.name, stars:u.stars||0, wins:u.wins||0, losses:u.losses||0, draws:u.draws||0, country:u.country||'XX' }));
 }
 
 // ════════════════════════════════════════════
