@@ -108,13 +108,15 @@ export async function getUser(uid) {
 }
 
 export async function getUserByName(name) {
+  const target = (name||"").trim();
   if (pgPool) {
-    const r = await pgPool.query('SELECT * FROM users WHERE name=$1', [name]);
+    // Recherche insensible à la casse (évite les échecs de connexion Ayoush/AYOUSH)
+    const r = await pgPool.query('SELECT * FROM users WHERE LOWER(name)=LOWER($1)', [target]);
     if (!r.rows[0]) return null;
     return getUser(r.rows[0].uid);
   }
   const users = fileLoad('users');
-  return Object.values(users).find(u => u.name === name) || null;
+  return Object.values(users).find(u => (u.name||"").toLowerCase() === target.toLowerCase()) || null;
 }
 
 export async function saveUser(user) {
