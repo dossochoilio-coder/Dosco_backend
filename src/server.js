@@ -12,6 +12,7 @@ import {
   initStorage, getUser, getUserByName, saveUser, deleteUser,
   getProgress, saveProgress, receiptExists, saveReceipt, storageBackend,
   getAllRegisteredUsers, addTournamentSignup, getTournamentSignups, isSignedUp,
+  saveBracket, loadBracket, loadAllBrackets,
 } from './storage.js';
 import { hashPassword, verifyPassword, validateName, validatePassword } from './auth.js';
 import { rateLimit } from './rate-limit.js';
@@ -592,7 +593,7 @@ function createGame(p1, p2) {
   return game;
 }
 
-function handleMove(ws, uid, { gameId, from, to }) {
+async function handleMove(ws, uid, { gameId, from, to }) {
   const game = games.get(gameId);
   if (!game) return send(ws, "error", { msg: "Partie introuvable" });
 
@@ -633,6 +634,38 @@ function handleMove(ws, uid, { gameId, from, to }) {
   if (end) {
     settleStakes(game, end.winner).catch(e => console.error('settle', e));
     const endData = { gameId, winner: end.winner, endType: end.type, reason: end.reason || null, stake: game.stake };
+    // Si c'est une partie de TOURNOI : faire avancer le gagnant dans le bracket
+    if (game.tournament && end.winner) {
+      try {
+        const winnerUid = game.players[end.winner]; // end.winner = "B" ou "W" → uid
+        const bracket = tournaments.get(game.tournament.weekId);
+        if (bracket && winnerUid) {
+          advanceTournament(bracket, game.tournament.matchId, winnerUid);
+          persistBracket(bracket);
+          endData.tournament = { weekId: game.tournament.weekId, matchId: game.tournament.matchId };
+          console.log(`[tournament] Match ${game.tournament.matchId} terminé, gagnant: ${winnerUid}`);
+          // Le champion vient d'être désigné (finale) → créditer la récompense
+          if (bracket.champion && bracket.champion.uid === winnerUid && !bracket._prizePaid) {
+            bracket._prizePaid = true;
+            const champUser = await loadUser(winnerUid);
+            if (champUser) {
+              champUser.stars = (champUser.stars || 0) + TOURNAMENT_PRIZE;
+              await persistUser(champUser);
+              console.log(`[tournament] 🏆 ${champUser.name} CHAMPION → +${TOURNAMENT_PRIZE}★ (solde ${champUser.stars})`);
+              endData.tournament.champion = true;
+              endData.tournament.prize = TOURNAMENT_PRIZE;
+              endData.tournament.newStars = champUser.stars;
+            }
+          }
+          // Diffuser le bracket mis à jour à tous les participants connectés
+          const bs = serializeBracket(bracket);
+          for (const puid of bracket.players) {
+            const pws = playerSockets.get(puid);
+            if (pws) send(pws, "tournament_state", { weekId: bracket.weekId, bracket: bs, joined: true });
+          }
+        }
+      } catch (e) { console.error('tournament advance', e); }
+    }
     if (p1ws) send(p1ws, "game_end", endData);
     if (p2ws) send(p2ws, "game_end", endData);
     cacheEndedGame(game);
@@ -651,6 +684,127 @@ function isoWeekId() {
   firstThursday.setUTCDate(firstThursday.getUTCDate() - fdNr + 3);
   const week = 1 + Math.round((target - firstThursday) / (7 * 24 * 3600 * 1000));
   return target.getUTCFullYear() + "-W" + String(week).padStart(2, "0");
+}
+
+// ════════════════════════════════════════════
+// TOURNOI À ÉLIMINATION DIRECTE (8 joueurs)
+// ════════════════════════════════════════════
+// Bracket en mémoire par semaine. 3 tours : quarts (4 matchs) → demis (2) → finale (1).
+// Un match démarre quand ses DEUX joueurs sont connectés et prêts. Le gagnant avance,
+// le perdant est éliminé jusqu'au prochain tournoi.
+const tournaments = new Map(); // weekId → bracket
+
+const TOURNAMENT_SIZE = 8;
+const TOURNAMENT_ENTRY_FEE = 50;   // mise d'inscription (étoiles)
+const TOURNAMENT_PRIZE = 500;       // récompense du champion (étoiles)
+
+function newBracket(weekId, players) {
+  // players : liste de {uid, name} (8 joueurs). On mélange pour l'appariement.
+  const shuffled = players.slice().sort(() => Math.random() - 0.5).slice(0, TOURNAMENT_SIZE);
+  // Quarts : 4 matchs de 2 joueurs
+  const makeMatch = (id, a, b) => ({
+    id, a: a || null, b: b || null, winner: null,
+    gameId: null, status: (a && b) ? "pending" : "bye"
+  });
+  const quarters = [
+    makeMatch("QF1", shuffled[0], shuffled[1]),
+    makeMatch("QF2", shuffled[2], shuffled[3]),
+    makeMatch("QF3", shuffled[4], shuffled[5]),
+    makeMatch("QF4", shuffled[6], shuffled[7])
+  ];
+  const semis = [ makeMatch("SF1", null, null), makeMatch("SF2", null, null) ];
+  const final = makeMatch("FINAL", null, null);
+  return {
+    weekId, createdAt: Date.now(), round: "quarters",
+    quarters, semis, final, champion: null,
+    players: shuffled.map(p => p.uid)
+  };
+}
+
+// Trouver le match actif d'un joueur (celui où il doit jouer maintenant)
+function findPlayerMatch(bracket, uid) {
+  const rounds = [bracket.quarters, bracket.semis, [bracket.final]];
+  for (const matches of rounds) {
+    for (const m of matches) {
+      if (m.status === "done") continue;
+      if ((m.a && m.a.uid === uid) || (m.b && m.b.uid === uid)) return m;
+    }
+  }
+  return null;
+}
+
+// Enregistrer le résultat d'un match de tournoi et faire avancer le gagnant
+function advanceTournament(bracket, matchId, winnerUid) {
+  const all = [...bracket.quarters, ...bracket.semis, bracket.final];
+  const match = all.find(m => m.id === matchId);
+  if (!match || match.status === "done") return;
+  const winner = (match.a && match.a.uid === winnerUid) ? match.a
+               : (match.b && match.b.uid === winnerUid) ? match.b : null;
+  if (!winner) return;
+  match.winner = winner;
+  match.status = "done";
+  // Faire avancer le gagnant au tour suivant
+  if (matchId === "QF1") bracket.semis[0].a = winner;
+  else if (matchId === "QF2") bracket.semis[0].b = winner;
+  else if (matchId === "QF3") bracket.semis[1].a = winner;
+  else if (matchId === "QF4") bracket.semis[1].b = winner;
+  else if (matchId === "SF1") bracket.final.a = winner;
+  else if (matchId === "SF2") bracket.final.b = winner;
+  else if (matchId === "FINAL") bracket.champion = winner;
+  // Activer les matchs dont les deux joueurs sont désormais connus
+  for (const m of [...bracket.semis, bracket.final]) {
+    if (m.status !== "done" && m.a && m.b && m.status !== "pending") m.status = "pending";
+  }
+  // Mettre à jour le tour courant
+  if (bracket.champion) bracket.round = "done";
+  else if (bracket.semis.every(m => m.status === "done")) bracket.round = "final";
+  else if (bracket.quarters.every(m => m.status === "done")) bracket.round = "semis";
+}
+
+const TOURNAMENT_FORFEIT_MS = 24 * 60 * 60 * 1000; // 24 heures
+
+// Vérifier les forfaits : un joueur qui ne s'est jamais connecté dans les 24h
+// suivant le début du tournoi perd son match par forfait. Suit la dernière activité.
+function checkTournamentForfeits(bracket) {
+  if (!bracket || bracket.champion) return false;
+  const now = Date.now();
+  const deadline = (bracket.createdAt || now) + TOURNAMENT_FORFEIT_MS;
+  if (now < deadline) return false; // le délai de 24h n'est pas encore écoulé
+  let changed = false;
+  bracket.seen = bracket.seen || {}; // uid → dernier timestamp de connexion vu
+  const activeMatches = [...bracket.quarters, ...bracket.semis, bracket.final];
+  for (const m of activeMatches) {
+    if (m.status === "done" || !m.a || !m.b) continue;
+    const aOnline = playerSockets.has(m.a.uid) || (bracket.seen[m.a.uid] || 0) > 0;
+    const bOnline = playerSockets.has(m.b.uid) || (bracket.seen[m.b.uid] || 0) > 0;
+    // Si un seul des deux s'est connecté depuis le début → l'autre est forfait
+    if (aOnline && !bOnline) { advanceTournament(bracket, m.id, m.a.uid); changed = true;
+      console.log(`[tournament-forfait] ${m.b.name} absent 24h → ${m.a.name} avance`); }
+    else if (bOnline && !aOnline) { advanceTournament(bracket, m.id, m.b.uid); changed = true;
+      console.log(`[tournament-forfait] ${m.a.name} absent 24h → ${m.b.name} avance`); }
+    // Si AUCUN des deux ne s'est connecté, on laisse le match en attente (personne ne mérite d'avancer)
+  }
+  return changed;
+}
+
+// Sauvegarder un bracket en base (persiste aux redéploiements)
+function persistBracket(bracket) {
+  if (!bracket) return;
+  saveBracket(bracket.weekId, bracket).catch(e => console.error('saveBracket', e));
+}
+
+// Sérialiser le bracket pour l'envoi au client (sans données sensibles)
+function serializeBracket(bracket) {
+  if (!bracket) return null;
+  const m = (x) => x ? ({ id: x.id, a: x.a, b: x.b,
+    winner: x.winner ? x.winner.uid : null, status: x.status }) : null;
+  return {
+    weekId: bracket.weekId, round: bracket.round,
+    quarters: bracket.quarters.map(m), semis: bracket.semis.map(m),
+    final: m(bracket.final), champion: bracket.champion,
+    createdAt: bracket.createdAt,
+    forfeitDeadline: (bracket.createdAt || Date.now()) + TOURNAMENT_FORFEIT_MS
+  };
 }
 
 async function settleStakes(game, winnerColor) {
@@ -707,6 +861,15 @@ wss.on('connection', (ws) => {
           playerSockets.set(uid, ws);
           ws.uid = uid;
           send(ws, "authed", { uid, version: evaluateUpdate(msg.appVersion || "0.0.0") });
+          // Marquer la présence dans le tournoi en cours (évite le forfait 24h)
+          try {
+            const _bk = tournaments.get(isoWeekId());
+            if (_bk && _bk.players && _bk.players.includes(uid)) {
+              _bk.seen = _bk.seen || {};
+              _bk.seen[uid] = Date.now();
+              persistBracket(_bk);
+            }
+          } catch (e) {}
           // Livrer un game_end en attente (si le client s'était déconnecté avant de le recevoir)
           const pendingEnd = pendingGameEnds.get(uid);
           if (pendingEnd && (Date.now() - pendingEnd.ts) < 5 * 60 * 1000) {
@@ -813,7 +976,7 @@ wss.on('connection', (ws) => {
 
       case "move": {
         if (!uid) return;
-        handleMove(ws, uid, msg);
+        await handleMove(ws, uid, msg);
         break;
       }
 
@@ -1046,9 +1209,22 @@ wss.on('connection', (ws) => {
             return send(ws, "tournament_error", { msg: "Inscription réservée aux comptes enregistrés" });
           }
           const weekId = isoWeekId();
+          // Déjà inscrit ? Ne pas re-débiter.
+          const already = await isSignedUp(weekId, uid);
+          if (already) {
+            const signups = await getTournamentSignups(weekId);
+            return send(ws, "tournament_state", { weekId, signups, joined: true });
+          }
+          // Vérifier le solde et débiter la mise d'inscription
+          if ((u.stars || 0) < TOURNAMENT_ENTRY_FEE) {
+            return send(ws, "tournament_error", { msg: `Il faut ${TOURNAMENT_ENTRY_FEE} étoiles pour participer (vous en avez ${u.stars || 0}).` });
+          }
+          u.stars = Math.max(0, (u.stars || 0) - TOURNAMENT_ENTRY_FEE);
+          await persistUser(u);
           await addTournamentSignup(weekId, u);
+          console.log(`[tournament] ${u.name} inscrit (−${TOURNAMENT_ENTRY_FEE}★, solde ${u.stars})`);
           const signups = await getTournamentSignups(weekId);
-          send(ws, "tournament_state", { weekId, signups, joined: true });
+          send(ws, "tournament_state", { weekId, signups, joined: true, entryFee: TOURNAMENT_ENTRY_FEE, newStars: u.stars });
         } catch (e) {
           console.error('tournament_signup', e);
         }
@@ -1060,10 +1236,101 @@ wss.on('connection', (ws) => {
           const weekId = isoWeekId();
           const signups = await getTournamentSignups(weekId);
           const joined = uid ? await isSignedUp(weekId, uid) : false;
-          send(ws, "tournament_state", { weekId, signups, joined });
+          const bracket = serializeBracket(tournaments.get(weekId));
+          // Match actif du joueur (celui qu'il doit jouer maintenant)
+          let myMatch = null;
+          const bk = tournaments.get(weekId);
+          if (bk && uid) {
+            const pm = findPlayerMatch(bk, uid);
+            if (pm && pm.a && pm.b) myMatch = { id: pm.id, status: pm.status,
+              opponent: (pm.a.uid === uid ? pm.b : pm.a) };
+          }
+          send(ws, "tournament_state", { weekId, signups, joined, bracket, myMatch });
         } catch (e) {
           console.error('get_tournament', e);
           send(ws, "tournament_state", { weekId: isoWeekId(), signups: [], joined: false });
+        }
+        break;
+      }
+
+      // Générer le bracket quand 8 joueurs sont inscrits (n'importe qui peut le déclencher)
+      case "tournament_start": {
+        try {
+          const weekId = isoWeekId();
+          if (tournaments.has(weekId)) {
+            // Déjà démarré → renvoyer l'état
+            const bracket = serializeBracket(tournaments.get(weekId));
+            return send(ws, "tournament_state", { weekId, bracket, joined: uid ? await isSignedUp(weekId, uid) : false });
+          }
+          const signups = await getTournamentSignups(weekId);
+          if (signups.length < TOURNAMENT_SIZE) {
+            return send(ws, "tournament_error", { msg: `Il faut ${TOURNAMENT_SIZE} joueurs inscrits (actuellement ${signups.length}).` });
+          }
+          const players = signups.slice(0, TOURNAMENT_SIZE).map(s => ({ uid: s.uid, name: s.name || "Joueur" }));
+          const bracket = newBracket(weekId, players);
+          tournaments.set(weekId, bracket);
+          persistBracket(bracket);
+          console.log(`[tournament] Bracket généré pour ${weekId} avec ${players.length} joueurs`);
+          // Notifier tous les participants connectés + délai de forfait 24h
+          const forfeitDeadline = bracket.createdAt + TOURNAMENT_FORFEIT_MS;
+          for (const p of players) {
+            const pws = playerSockets.get(p.uid);
+            if (pws) send(pws, "tournament_state", {
+              weekId, bracket: serializeBracket(bracket), joined: true,
+              forfeitDeadline, forfeitHours: 24,
+              tournamentStarted: true
+            });
+          }
+        } catch (e) {
+          console.error('tournament_start', e);
+        }
+        break;
+      }
+
+      // Lancer son match de tournoi : attend que l'adversaire soit connecté et prêt
+      case "tournament_play": {
+        try {
+          if (!uid) return;
+          const weekId = isoWeekId();
+          const bracket = tournaments.get(weekId);
+          if (!bracket) return send(ws, "tournament_error", { msg: "Aucun tournoi en cours." });
+          const match = findPlayerMatch(bracket, uid);
+          if (!match || !match.a || !match.b) return send(ws, "tournament_error", { msg: "Aucun match disponible pour vous." });
+          if (match.status === "done") return send(ws, "tournament_error", { msg: "Ce match est déjà terminé." });
+          const oppEntry = match.a.uid === uid ? match.b : match.a;
+          const oppWs = playerSockets.get(oppEntry.uid);
+          // Marquer ce joueur comme prêt
+          match._ready = match._ready || {};
+          match._ready[uid] = true;
+          if (!oppWs) {
+            return send(ws, "tournament_waiting", { matchId: match.id, opponent: oppEntry.name, reason: "offline" });
+          }
+          // L'adversaire est connecté : est-il prêt aussi ?
+          if (!match._ready[oppEntry.uid]) {
+            // Prévenir l'adversaire qu'un match l'attend
+            send(oppWs, "tournament_match_ready", { matchId: match.id, opponent: (await loadUser(uid))?.name || "Joueur" });
+            return send(ws, "tournament_waiting", { matchId: match.id, opponent: oppEntry.name, reason: "not_ready" });
+          }
+          // Les DEUX sont prêts → créer la partie de tournoi
+          if (match.gameId && games.has(match.gameId)) {
+            return; // partie déjà en cours
+          }
+          const uA = await loadUser(match.a.uid);
+          const uB = await loadUser(match.b.uid);
+          if (!uA || !uB) return;
+          const wsA = playerSockets.get(uA.uid);
+          const wsB = playerSockets.get(uB.uid);
+          if (!wsA || !wsB) return send(ws, "tournament_waiting", { matchId: match.id, reason: "offline" });
+          const p1 = { uid: uA.uid, name: uA.name, title: null, skin: null, ws: wsA, stake: 0, galaxy: "voie_lactee" };
+          const p2 = { uid: uB.uid, name: uB.name, title: null, skin: null, ws: wsB, stake: 0, galaxy: "voie_lactee" };
+          const game = createGame(p1, p2);
+          game.tournament = { weekId, matchId: match.id }; // marquer comme partie de tournoi
+          match.gameId = game.id;
+          match.status = "playing";
+          persistBracket(bracket);
+          console.log(`[tournament] Match ${match.id} lancé: ${uA.name} vs ${uB.name}`);
+        } catch (e) {
+          console.error('tournament_play', e);
         }
         break;
       }
@@ -1149,9 +1416,34 @@ wss.on('connection', (ws) => {
 
 // Démarrage
 initStorage().then(() => {
-  server.listen(PORT, () => {
+  server.listen(PORT, async () => {
     console.log(`🌌 DOSCO backend sur le port ${PORT}`);
-    console.log(`✅ VERSION 2026-07-04-D : question secrète (récup mdp) + diag classement + login serveur-first`);
+    // Restaurer les brackets de tournoi persistés (survivent aux redéploiements)
+    try {
+      const saved = await loadAllBrackets();
+      for (const { weekId, bracket } of saved) {
+        if (bracket && weekId === isoWeekId()) { // seulement le tournoi de la semaine en cours
+          tournaments.set(weekId, bracket);
+          console.log(`[tournament] Bracket restauré pour ${weekId}`);
+        }
+      }
+    } catch (e) { console.error('restore brackets', e); }
+    // Vérification périodique des forfaits de tournoi (toutes les heures)
+    setInterval(() => {
+      try {
+        for (const [wid, bk] of tournaments) {
+          if (checkTournamentForfeits(bk)) {
+            persistBracket(bk);
+            const bs = serializeBracket(bk);
+            for (const puid of bk.players) {
+              const pws = playerSockets.get(puid);
+              if (pws) send(pws, "tournament_state", { weekId: wid, bracket: bs, joined: true });
+            }
+          }
+        }
+      } catch (e) { console.error('forfeit check', e); }
+    }, 60 * 60 * 1000);
+    console.log(`✅ VERSION 2026-07-04-G : tournoi persisté en base + forfait 24h + mise 50★/prix 500★`);
     console.log(` Stockage: ${storageBackend()}`);
     console.log(` WebSocket: ws://localhost:${PORT}`);
     console.log(` REST API: http://localhost:${PORT}/api`);
