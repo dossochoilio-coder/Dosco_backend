@@ -57,6 +57,11 @@ export async function initStorage() {
           signed_at BIGINT,
           PRIMARY KEY (week_id, uid)
         );
+        CREATE TABLE IF NOT EXISTS tournament_brackets (
+          week_id TEXT PRIMARY KEY,
+          data JSONB NOT NULL,
+          updated_at BIGINT
+        );
         CREATE TABLE IF NOT EXISTS push_subscriptions (
           uid TEXT PRIMARY KEY,
           subscription JSONB,
@@ -257,6 +262,43 @@ export async function isSignedUp(weekId, uid) {
   }
   const t = fileLoad('tournaments');
   return !!(t[weekId] && t[weekId][uid]);
+}
+
+// ── Persistance du bracket de tournoi ──
+export async function saveBracket(weekId, bracket) {
+  const ts = Date.now();
+  if (pgPool) {
+    await pgPool.query(
+      `INSERT INTO tournament_brackets (week_id, data, updated_at) VALUES ($1,$2,$3)
+       ON CONFLICT (week_id) DO UPDATE SET data=$2, updated_at=$3`,
+      [weekId, JSON.stringify(bracket), ts]
+    );
+    return;
+  }
+  const b = fileLoad('brackets');
+  b[weekId] = bracket;
+  fileSave('brackets', b);
+}
+
+export async function loadBracket(weekId) {
+  if (pgPool) {
+    const r = await pgPool.query('SELECT data FROM tournament_brackets WHERE week_id=$1', [weekId]);
+    if (!r.rows[0]) return null;
+    return typeof r.rows[0].data === "string" ? JSON.parse(r.rows[0].data) : r.rows[0].data;
+  }
+  const b = fileLoad('brackets');
+  return b[weekId] || null;
+}
+
+// Charger tous les brackets (pour restaurer en mémoire au démarrage)
+export async function loadAllBrackets() {
+  if (pgPool) {
+    const r = await pgPool.query('SELECT week_id, data FROM tournament_brackets');
+    return r.rows.map(x => ({ weekId: x.week_id,
+      bracket: typeof x.data === "string" ? JSON.parse(x.data) : x.data }));
+  }
+  const b = fileLoad('brackets');
+  return Object.entries(b).map(([weekId, bracket]) => ({ weekId, bracket }));
 }
 
 // ════════════════════════════════════════════
