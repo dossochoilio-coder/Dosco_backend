@@ -106,11 +106,15 @@ export async function getUser(uid) {
     if (!r.rows[0]) return null;
     const u = r.rows[0];
     // IMPORTANT : étaler u.data EN PREMIER, puis les colonnes fixes, pour que les
-    // colonnes (pass_hash, stars, wins…) priment TOUJOURS sur d'éventuelles clés
-    // homonymes présentes dans le JSONB data (sinon le mot de passe peut être écrasé).
+    // colonnes (pass_hash, stars, wins…) priment sur d'éventuelles clés homonymes du JSONB.
     const data = u.data || {};
+    // RÉCUPÉRATION : si la colonne pass_hash est vide MAIS que data contient un passHash
+    // valide (compte abîmé par l'ancien bug), on récupère le mot de passe depuis data.
+    const recoveredHash = (u.pass_hash && String(u.pass_hash).length > 0)
+      ? u.pass_hash
+      : (data.passHash && String(data.passHash).length > 0 ? data.passHash : null);
     return { ...data,
-             uid:u.uid, name:u.name, passHash:u.pass_hash, stars:u.stars, rank:u.rank,
+             uid:u.uid, name:u.name, passHash:recoveredHash, stars:u.stars, rank:u.rank,
              wins:u.wins, losses:u.losses, hasPass:u.has_pass, createdAt:Number(u.created_at) };
   }
   const users = fileLoad('users');
