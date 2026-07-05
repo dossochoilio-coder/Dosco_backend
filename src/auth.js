@@ -38,7 +38,8 @@ export function verifyPassword(password, stored) {
 export function validateName(name) {
   if (typeof name !== 'string') return false;
   const trimmed = name.trim();
-  return trimmed.length >= 2 && trimmed.length <= 14 && /^[\w\-À-ÿ ]+$/.test(trimmed);
+  // Autorise lettres (accents inclus), chiffres, espace, tiret, underscore et point.
+  return trimmed.length >= 2 && trimmed.length <= 14 && /^[\w\-.À-ÿ ]+$/.test(trimmed);
 }
 
 // Validation basique d'un mot de passe
