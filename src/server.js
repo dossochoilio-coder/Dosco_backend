@@ -1443,7 +1443,7 @@ initStorage().then(() => {
         }
       } catch (e) { console.error('forfeit check', e); }
     }, 60 * 60 * 1000);
-    console.log(`✅ VERSION 2026-07-04-G : tournoi persisté en base + forfait 24h + mise 50★/prix 500★`);
+    console.log(`✅ VERSION 2026-07-05-A : fix passHash écrasé par data JSONB (login réparé) + tournoi persisté`);
     console.log(` Stockage: ${storageBackend()}`);
     console.log(` WebSocket: ws://localhost:${PORT}`);
     console.log(` REST API: http://localhost:${PORT}/api`);
