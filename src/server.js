@@ -1454,7 +1454,7 @@ initStorage().then(() => {
         }
       } catch (e) { console.error('forfeit check', e); }
     }, 60 * 60 * 1000);
-    console.log(`✅ VERSION 2026-07-05-C : pseudos avec point autorisés (D.Choilio) + récup passHash + diag login`);
+    console.log(`✅ VERSION 2026-07-06-A : login priorise vrais comptes sur invités homonymes + point + récup passHash`);
     console.log(` Stockage: ${storageBackend()}`);
     console.log(` WebSocket: ws://localhost:${PORT}`);
     console.log(` REST API: http://localhost:${PORT}/api`);
