@@ -124,13 +124,21 @@ export async function getUser(uid) {
 export async function getUserByName(name) {
   const target = (name||"").trim();
   if (pgPool) {
-    // Recherche insensible à la casse (évite les échecs de connexion Ayoush/AYOUSH)
-    const r = await pgPool.query('SELECT * FROM users WHERE LOWER(name)=LOWER($1)', [target]);
+    // Recherche insensible à la casse. PRIORITÉ aux vrais comptes (avec mot de passe)
+    // sur les comptes invités : si un invité et un vrai compte portent le même nom,
+    // la connexion doit trouver le vrai compte, pas l'invité (qui n'a pas de passHash).
+    const r = await pgPool.query(
+      `SELECT * FROM users WHERE LOWER(name)=LOWER($1)
+       ORDER BY (pass_hash IS NOT NULL) DESC, created_at ASC LIMIT 1`,
+      [target]
+    );
     if (!r.rows[0]) return null;
     return getUser(r.rows[0].uid);
   }
   const users = fileLoad('users');
-  return Object.values(users).find(u => (u.name||"").toLowerCase() === target.toLowerCase()) || null;
+  const matches = Object.values(users).filter(u => (u.name||"").toLowerCase() === target.toLowerCase());
+  // Prioriser un compte avec passHash (vrai compte) sur un invité
+  return matches.find(u => u.passHash) || matches[0] || null;
 }
 
 export async function saveUser(user) {
