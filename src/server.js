@@ -27,8 +27,8 @@ import { rateLimit } from './rate-limit.js';
 const APP_VERSION_INFO = {
   latest: "1.0.0",      // dernière version publiée sur le Store
   minimum: "1.0.0",     // version minimale acceptée (en dessous = MAJ obligatoire)
-  androidPackage: "com.dosco.bataille.etoiles",
-  storeUrl: "https://play.google.com/store/apps/details?id=com.dosco.bataille.etoiles",
+  androidPackage: "com.dosco.batailledesetoiles",
+  storeUrl: "https://play.google.com/store/apps/details?id=com.dosco.batailledesetoiles",
   // Message optionnel affiché à l'utilisateur (null = message par défaut côté client)
   message: null
 };
@@ -592,12 +592,12 @@ function createGame(p1, p2) {
 
   console.log(`[game_start] ${gameId} | B="${p1.name}" (titre:${p1.title||"—"}) vs W="${p2.name}" (titre:${p2.title||"—"})`);
   send(p1.ws, "game_start", {
-    gameId, color: "B", opponent: p2.name, opponentTitle: p2.title || null, opponentSkin: p2.skin || null,
+    gameId, color: "B", opponent: p2.name, opponentUid: p2.uid, opponentTitle: p2.title || null, opponentSkin: p2.skin || null,
     board: game.board, turn: "B", stake: game.stake, galaxy: game.galaxy,
     timeB: game.timeB, timeW: game.timeW, serverNow: Date.now()
   });
   send(p2.ws, "game_start", {
-    gameId, color: "W", opponent: p1.name, opponentTitle: p1.title || null, opponentSkin: p1.skin || null,
+    gameId, color: "W", opponent: p1.name, opponentUid: p1.uid, opponentTitle: p1.title || null, opponentSkin: p1.skin || null,
     board: game.board, turn: "B", stake: game.stake, galaxy: game.galaxy,
     timeB: game.timeB, timeW: game.timeW, serverNow: Date.now()
   });
@@ -917,6 +917,7 @@ wss.on('connection', (ws) => {
                 gameId: gid,
                 color: myColor,
                 opponent: g.names[oppColor],
+                opponentUid: g.players[oppColor],
                 opponentTitle: g.titles ? g.titles[oppColor] : null,
                 opponentSkin: g.skins ? g.skins[oppColor] : null,
                 board: g.board,
@@ -988,6 +989,34 @@ wss.on('connection', (ws) => {
       case "move": {
         if (!uid) return;
         await handleMove(ws, uid, msg);
+        break;
+      }
+
+      // Profil d'un adversaire : victoires/défaites/nulles (stats permanentes).
+      // Recherche prioritaire par uid (fiable), repli par nom si absent.
+      case "get_profile": {
+        let target = null;
+        if (typeof msg.uid === "string" && msg.uid) {
+          target = await loadUser(msg.uid);
+        }
+        if (!target && typeof msg.name === "string" && msg.name.trim()) {
+          // Le nom peut porter un préfixe cosmétique (ex: "🤖 ") côté client ;
+          // on ne matche que sur le nom brut tel qu'enregistré en base.
+          target = await getUserByName(msg.name.trim());
+        }
+        if (!target) {
+          send(ws, "profile_data", { found: false });
+          break;
+        }
+        send(ws, "profile_data", {
+          found: true,
+          name: target.name,
+          wins: target.wins || 0,
+          losses: target.losses || 0,
+          draws: target.draws || 0,
+          stars: target.stars || 0,
+          rank: target.rank || null,
+        });
         break;
       }
 
