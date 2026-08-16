@@ -686,38 +686,48 @@ function isoWeekId() {
 }
 
 // ════════════════════════════════════════════
-// TOURNOI À ÉLIMINATION DIRECTE (8 joueurs)
+// TOURNOI À ÉLIMINATION DIRECTE (4 joueurs)
 // ════════════════════════════════════════════
-// Bracket en mémoire par semaine. 3 tours : quarts (4 matchs) → demis (2) → finale (1).
+// Bracket en mémoire par semaine. 2 tours : demi-finales (2 matchs) → finale (1).
 // Un match démarre quand ses DEUX joueurs sont connectés et prêts. Le gagnant avance,
 // le perdant est éliminé jusqu'au prochain tournoi.
 const tournaments = new Map(); // weekId → bracket
 
-const TOURNAMENT_SIZE = 8;
+const TOURNAMENT_SIZE = 4;
 const TOURNAMENT_ENTRY_FEE = 50;   // mise d'inscription (étoiles)
 const TOURNAMENT_PRIZE = 500;       // récompense du champion (étoiles)
 
-function newBracket(weekId, players) {
-  // players : liste de {uid, name} (8 joueurs). On mélange pour l'appariement.
+function newBracket(bracketId, weekId, players) {
+  // players : liste de {uid, name} (4 joueurs). On mélange pour l'appariement.
+  // Format à 4 : demi-finales directement, puis finale (pas de tour de quarts).
   const shuffled = players.slice().sort(() => Math.random() - 0.5).slice(0, TOURNAMENT_SIZE);
-  // Quarts : 4 matchs de 2 joueurs
   const makeMatch = (id, a, b) => ({
     id, a: a || null, b: b || null, winner: null,
     gameId: null, status: (a && b) ? "pending" : "bye"
   });
-  const quarters = [
-    makeMatch("QF1", shuffled[0], shuffled[1]),
-    makeMatch("QF2", shuffled[2], shuffled[3]),
-    makeMatch("QF3", shuffled[4], shuffled[5]),
-    makeMatch("QF4", shuffled[6], shuffled[7])
+  const semis = [
+    makeMatch("SF1", shuffled[0], shuffled[1]),
+    makeMatch("SF2", shuffled[2], shuffled[3])
   ];
-  const semis = [ makeMatch("SF1", null, null), makeMatch("SF2", null, null) ];
   const final = makeMatch("FINAL", null, null);
   return {
-    weekId, createdAt: Date.now(), round: "quarters",
-    quarters, semis, final, champion: null,
+    id: bracketId, weekId, createdAt: Date.now(), round: "semis",
+    quarters: [], semis, final, champion: null,
     players: shuffled.map(p => p.uid)
   };
+}
+
+// Tous les brackets actifs (peu importe leur statut) d'une semaine donnée.
+// Plusieurs brackets coexistent désormais : dès que 4 nouveaux joueurs non
+// encore assignés sont inscrits, un NOUVEAU bracket est créé plutôt que de
+// bloquer les inscriptions suivantes — les places ne manquent plus jamais.
+function getWeekBrackets(weekId) {
+  return [...tournaments.values()].filter(b => b.weekId === weekId);
+}
+// Retrouve le bracket SPÉCIFIQUE auquel un joueur appartient cette semaine
+// (chaque joueur n'appartient qu'à un seul bracket par semaine).
+function findPlayerBracket(weekId, uid) {
+  return getWeekBrackets(weekId).find(b => b.players.includes(uid)) || null;
 }
 
 // Trouver le match actif d'un joueur (celui où il doit jouer maintenant)
@@ -742,7 +752,7 @@ async function handleTournamentGameEnd(game, winnerColor, endData) {
   if (!game.tournament || !winnerColor) return;
   try {
     const winnerUid = game.players[winnerColor];
-    const bracket = tournaments.get(game.tournament.weekId);
+    const bracket = tournaments.get(game.tournament.bracketId);
     if (!bracket || !winnerUid) return;
     advanceTournament(bracket, game.tournament.matchId, winnerUid);
     persistBracket(bracket);
@@ -780,22 +790,17 @@ function advanceTournament(bracket, matchId, winnerUid) {
   if (!winner) return;
   match.winner = winner;
   match.status = "done";
-  // Faire avancer le gagnant au tour suivant
-  if (matchId === "QF1") bracket.semis[0].a = winner;
-  else if (matchId === "QF2") bracket.semis[0].b = winner;
-  else if (matchId === "QF3") bracket.semis[1].a = winner;
-  else if (matchId === "QF4") bracket.semis[1].b = winner;
-  else if (matchId === "SF1") bracket.final.a = winner;
+  // Faire avancer le gagnant au tour suivant (format à 4 : demis → finale)
+  if (matchId === "SF1") bracket.final.a = winner;
   else if (matchId === "SF2") bracket.final.b = winner;
   else if (matchId === "FINAL") bracket.champion = winner;
-  // Activer les matchs dont les deux joueurs sont désormais connus
-  for (const m of [...bracket.semis, bracket.final]) {
-    if (m.status !== "done" && m.a && m.b && m.status !== "pending") m.status = "pending";
+  // Activer la finale dès que les deux demi-finalistes sont désormais connus
+  if (bracket.final.status !== "done" && bracket.final.a && bracket.final.b && bracket.final.status !== "pending") {
+    bracket.final.status = "pending";
   }
   // Mettre à jour le tour courant
   if (bracket.champion) bracket.round = "done";
   else if (bracket.semis.every(m => m.status === "done")) bracket.round = "final";
-  else if (bracket.quarters.every(m => m.status === "done")) bracket.round = "semis";
 }
 
 const TOURNAMENT_FORFEIT_MS = 24 * 60 * 60 * 1000; // 24 heures
@@ -827,7 +832,7 @@ function checkTournamentForfeits(bracket) {
 // Sauvegarder un bracket en base (persiste aux redéploiements)
 function persistBracket(bracket) {
   if (!bracket) return;
-  saveBracket(bracket.weekId, bracket).catch(e => console.error('saveBracket', e));
+  saveBracket(bracket.id, bracket).catch(e => console.error('saveBracket', e));
 }
 
 // Sérialiser le bracket pour l'envoi au client (sans données sensibles)
@@ -836,7 +841,7 @@ function serializeBracket(bracket) {
   const m = (x) => x ? ({ id: x.id, a: x.a, b: x.b,
     winner: x.winner ? x.winner.uid : null, status: x.status }) : null;
   return {
-    weekId: bracket.weekId, round: bracket.round,
+    id: bracket.id, weekId: bracket.weekId, round: bracket.round,
     quarters: bracket.quarters.map(m), semis: bracket.semis.map(m),
     final: m(bracket.final), champion: bracket.champion,
     createdAt: bracket.createdAt,
@@ -905,10 +910,10 @@ wss.on('connection', (ws) => {
           playerSockets.set(uid, ws);
           ws.uid = uid;
           send(ws, "authed", { uid, version: evaluateUpdate(msg.appVersion || "0.0.0") });
-          // Marquer la présence dans le tournoi en cours (évite le forfait 24h)
+          // Marquer la présence dans le bracket de tournoi du joueur (évite le forfait 24h)
           try {
-            const _bk = tournaments.get(isoWeekId());
-            if (_bk && _bk.players && _bk.players.includes(uid)) {
+            const _bk = findPlayerBracket(isoWeekId(), uid);
+            if (_bk) {
               _bk.seen = _bk.seen || {};
               _bk.seen[uid] = Date.now();
               persistBracket(_bk);
@@ -1367,10 +1372,11 @@ wss.on('connection', (ws) => {
           const weekId = isoWeekId();
           const signups = await getTournamentSignups(weekId);
           const joined = uid ? await isSignedUp(weekId, uid) : false;
-          const bracket = serializeBracket(tournaments.get(weekId));
+          // Bracket SPÉCIFIQUE de ce joueur (chacun n'appartient qu'à un seul bracket)
+          const bk = uid ? findPlayerBracket(weekId, uid) : null;
+          const bracket = serializeBracket(bk);
           // Match actif du joueur (celui qu'il doit jouer maintenant)
           let myMatch = null;
-          const bk = tournaments.get(weekId);
           if (bk && uid) {
             const pm = findPlayerMatch(bk, uid);
             if (pm && pm.a && pm.b) myMatch = { id: pm.id, status: pm.status,
@@ -1384,24 +1390,25 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // Générer le bracket quand 8 joueurs sont inscrits (n'importe qui peut le déclencher)
+      // Générer un NOUVEAU bracket dès que 4 joueurs inscrits ne sont pas
+      // encore assignés à un bracket existant cette semaine — plusieurs
+      // brackets coexistent donc en parallèle, les places ne manquent jamais.
       case "tournament_start": {
         try {
           const weekId = isoWeekId();
-          if (tournaments.has(weekId)) {
-            // Déjà démarré → renvoyer l'état
-            const bracket = serializeBracket(tournaments.get(weekId));
-            return send(ws, "tournament_state", { weekId, bracket, joined: uid ? await isSignedUp(weekId, uid) : false });
-          }
           const signups = await getTournamentSignups(weekId);
-          if (signups.length < TOURNAMENT_SIZE) {
-            return send(ws, "tournament_error", { msg: `Il faut ${TOURNAMENT_SIZE} joueurs inscrits (actuellement ${signups.length}).` });
+          const weekBrackets = getWeekBrackets(weekId);
+          const assignedUids = new Set(weekBrackets.flatMap(b => b.players));
+          const unassigned = signups.filter(s => !assignedUids.has(s.uid));
+          if (unassigned.length < TOURNAMENT_SIZE) {
+            return send(ws, "tournament_error", { msg: `Il faut ${TOURNAMENT_SIZE} joueurs inscrits en attente d'un bracket (actuellement ${unassigned.length}).` });
           }
-          const players = signups.slice(0, TOURNAMENT_SIZE).map(s => ({ uid: s.uid, name: s.name || "Joueur" }));
-          const bracket = newBracket(weekId, players);
-          tournaments.set(weekId, bracket);
+          const players = unassigned.slice(0, TOURNAMENT_SIZE).map(s => ({ uid: s.uid, name: s.name || "Joueur" }));
+          const bracketId = `${weekId}#${weekBrackets.length + 1}`;
+          const bracket = newBracket(bracketId, weekId, players);
+          tournaments.set(bracketId, bracket);
           persistBracket(bracket);
-          console.log(`[tournament] Bracket généré pour ${weekId} avec ${players.length} joueurs`);
+          console.log(`[tournament] Bracket ${bracketId} généré avec ${players.length} joueurs (${weekBrackets.length + 1}ᵉ bracket de la semaine)`);
           // Notifier tous les participants connectés + délai de forfait 24h
           const forfeitDeadline = bracket.createdAt + TOURNAMENT_FORFEIT_MS;
           for (const p of players) {
@@ -1423,7 +1430,7 @@ wss.on('connection', (ws) => {
         try {
           if (!uid) return;
           const weekId = isoWeekId();
-          const bracket = tournaments.get(weekId);
+          const bracket = findPlayerBracket(weekId, uid);
           if (!bracket) return send(ws, "tournament_error", { msg: "Aucun tournoi en cours." });
           const match = findPlayerMatch(bracket, uid);
           if (!match || !match.a || !match.b) return send(ws, "tournament_error", { msg: "Aucun match disponible pour vous." });
@@ -1469,7 +1476,7 @@ wss.on('connection', (ws) => {
             const p1 = { uid: uA.uid, name: uA.name, title: null, skin: null, ws: wsA, stake: 0, galaxy: "voie_lactee" };
             const p2 = { uid: uB.uid, name: uB.name, title: null, skin: null, ws: wsB, stake: 0, galaxy: "voie_lactee" };
             const game = createGame(p1, p2);
-            game.tournament = { weekId, matchId: match.id }; // marquer comme partie de tournoi
+            game.tournament = { weekId, bracketId: bracket.id, matchId: match.id }; // marquer comme partie de tournoi
             match.gameId = game.id;
             match.status = "playing";
             persistBracket(bracket);
@@ -1572,22 +1579,22 @@ initStorage().then(() => {
     try {
       const saved = await loadAllBrackets();
       for (const { weekId, bracket } of saved) {
-        if (bracket && weekId === isoWeekId()) { // seulement le tournoi de la semaine en cours
-          tournaments.set(weekId, bracket);
-          console.log(`[tournament] Bracket restauré pour ${weekId}`);
+        if (bracket && bracket.weekId === isoWeekId()) { // seulement les tournois de la semaine en cours
+          tournaments.set(bracket.id, bracket);
+          console.log(`[tournament] Bracket ${bracket.id} restauré`);
         }
       }
     } catch (e) { console.error('restore brackets', e); }
     // Vérification périodique des forfaits de tournoi (toutes les heures)
     setInterval(() => {
       try {
-        for (const [wid, bk] of tournaments) {
+        for (const [bid, bk] of tournaments) {
           if (checkTournamentForfeits(bk)) {
             persistBracket(bk);
             const bs = serializeBracket(bk);
             for (const puid of bk.players) {
               const pws = playerSockets.get(puid);
-              if (pws) send(pws, "tournament_state", { weekId: wid, bracket: bs, joined: true });
+              if (pws) send(pws, "tournament_state", { weekId: bk.weekId, bracket: bs, joined: true });
             }
           }
         }
