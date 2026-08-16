@@ -1355,20 +1355,37 @@ wss.on('connection', (ws) => {
           if (match.gameId && games.has(match.gameId)) {
             return; // partie déjà en cours
           }
-          const uA = await loadUser(match.a.uid);
-          const uB = await loadUser(match.b.uid);
-          if (!uA || !uB) return;
-          const wsA = playerSockets.get(uA.uid);
-          const wsB = playerSockets.get(uB.uid);
-          if (!wsA || !wsB) return send(ws, "tournament_waiting", { matchId: match.id, reason: "offline" });
-          const p1 = { uid: uA.uid, name: uA.name, title: null, skin: null, ws: wsA, stake: 0, galaxy: "voie_lactee" };
-          const p2 = { uid: uB.uid, name: uB.name, title: null, skin: null, ws: wsB, stake: 0, galaxy: "voie_lactee" };
-          const game = createGame(p1, p2);
-          game.tournament = { weekId, matchId: match.id }; // marquer comme partie de tournoi
-          match.gameId = game.id;
-          match.status = "playing";
-          persistBracket(bracket);
-          console.log(`[tournament] Match ${match.id} lancé: ${uA.name} vs ${uB.name}`);
+          // Verrou synchrone anti-course : si les deux joueurs déclenchent
+          // tournament_play au même instant, leurs deux gestionnaires de
+          // message (un par socket) s'exécutent de façon entrelacée dès le
+          // premier "await" ci-dessous. Sans ce verrou posé AVANT le premier
+          // await, chaque invocation pouvait créer sa PROPRE partie séparée,
+          // dissociant les deux joueurs (bug rapporté : chacun se retrouvait
+          // seul, sans réel adversaire en face, et aucune progression n'était
+          // jamais enregistrée dans le bracket).
+          if (match._starting) return;
+          match._starting = true;
+          try {
+            const uA = await loadUser(match.a.uid);
+            const uB = await loadUser(match.b.uid);
+            if (!uA || !uB) return;
+            const wsA = playerSockets.get(uA.uid);
+            const wsB = playerSockets.get(uB.uid);
+            if (!wsA || !wsB) return send(ws, "tournament_waiting", { matchId: match.id, reason: "offline" });
+            // Double vérification après l'attente : une autre invocation a-t-elle
+            // déjà créé la partie pendant qu'on chargeait les utilisateurs ?
+            if (match.gameId && games.has(match.gameId)) return;
+            const p1 = { uid: uA.uid, name: uA.name, title: null, skin: null, ws: wsA, stake: 0, galaxy: "voie_lactee" };
+            const p2 = { uid: uB.uid, name: uB.name, title: null, skin: null, ws: wsB, stake: 0, galaxy: "voie_lactee" };
+            const game = createGame(p1, p2);
+            game.tournament = { weekId, matchId: match.id }; // marquer comme partie de tournoi
+            match.gameId = game.id;
+            match.status = "playing";
+            persistBracket(bracket);
+            console.log(`[tournament] Match ${match.id} lancé: ${uA.name} vs ${uB.name}`);
+          } finally {
+            match._starting = false;
+          }
         } catch (e) {
           console.error('tournament_play', e);
         }
