@@ -655,6 +655,24 @@ async function handleMove(ws, uid, { gameId, from, to }) {
 }
 
 // ID de semaine ISO (identique au client) pour le tournoi hebdomadaire
+// ════════════════════════════════════════════════════════
+// 🏟 LIGUES STELLAIRES — classement compétitif persistant + récompenses hebdo
+// ════════════════════════════════════════════════════════
+const LEAGUE_TIERS = [
+  { id: 0, name: "Ligue Naine Blanche", min: 0,    max: 499,  reward: 50 },
+  { id: 1, name: "Ligue Naine Bleue",   min: 500,  max: 999,  reward: 150 },
+  { id: 2, name: "Ligue Géant Rouge",   min: 1000, max: 1999, reward: 300 },
+  { id: 3, name: "Ligue Supernova",     min: 2000, max: 4999, reward: 750 },
+  { id: 4, name: "Ligue Trou Noir",     min: 5000, max: null, reward: 2000 },
+];
+function getLeagueIndexForPts(pts) {
+  pts = pts || 0;
+  for (let i = LEAGUE_TIERS.length - 1; i >= 0; i--) {
+    if (pts >= LEAGUE_TIERS[i].min) return i;
+  }
+  return 0;
+}
+
 function isoWeekId() {
   const d = new Date();
   const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
@@ -842,6 +860,13 @@ async function settleStakes(game, winnerColor) {
     // Statistiques TOUJOURS comptées (pour le classement par % de victoires)
     winner.wins = (winner.wins || 0) + 1;
     loser.losses = (loser.losses || 0) + 1;
+    // ── Points de Ligue (classement des Ligues Stellaires) ──
+    // Basés sur la mise, avec un plancher pour que même les parties de
+    // tournoi (mise=0) fassent progresser le classement de ligue.
+    const leaguePtsGain = Math.max(game.stake || 0, 20);
+    const leaguePtsLoss = Math.max(Math.ceil((game.stake || 0) / 2), 10);
+    winner.pts = (winner.pts || 0) + leaguePtsGain;
+    loser.pts = Math.max(0, (loser.pts || 0) - leaguePtsLoss);
     await persistUser(winner);
     await persistUser(loser);
   }
@@ -889,6 +914,22 @@ wss.on('connection', (ws) => {
               persistBracket(_bk);
             }
           } catch (e) {}
+          // ── Récompense hebdomadaire de Ligue ──
+          // Versée une fois par semaine, à la première connexion suivant le
+          // changement de semaine ISO — selon la ligue occupée à cet instant.
+          try {
+            const wk = isoWeekId();
+            const uLg = await loadUser(uid);
+            if (uLg && uLg.lastLeagueRewardWeek !== wk) {
+              const tierIdx = getLeagueIndexForPts(uLg.pts || 0);
+              const tier = LEAGUE_TIERS[tierIdx];
+              uLg.stars = (uLg.stars || 0) + tier.reward;
+              uLg.lastLeagueRewardWeek = wk;
+              await persistUser(uLg);
+              send(ws, "league_reward", { league: tier.name, reward: tier.reward, newStars: uLg.stars });
+              console.log(`[league] ${uLg.name} reçoit ${tier.reward}★ (${tier.name})`);
+            }
+          } catch (e) { console.error('league reward', e); }
           // Livrer un game_end en attente (si le client s'était déconnecté avant de le recevoir)
           const pendingEnd = pendingGameEnds.get(uid);
           if (pendingEnd && (Date.now() - pendingEnd.ts) < 5 * 60 * 1000) {
@@ -1252,6 +1293,41 @@ wss.on('connection', (ws) => {
         } catch (e) {
           console.error('get_leaderboard', e);
           send(ws, "leaderboard", { players: [], world: [], national: [], me: { world: null, national: null } });
+        }
+        break;
+      }
+
+      case "get_league": {
+        // Classement RÉEL des Ligues Stellaires : nombre de joueurs par ligue,
+        // ligue et rang du joueur courant — construit depuis les points de
+        // ligue persistés côté serveur (voir settleStakes).
+        try {
+          const users = await getAllRegisteredUsers();
+          const withPts = users.map(u => ({ id: u.uid, name: u.name, pts: u.pts || 0 }));
+          const counts = LEAGUE_TIERS.map(() => 0);
+          withPts.forEach(u => { counts[getLeagueIndexForPts(u.pts)]++; });
+
+          const myPts = uid ? (withPts.find(u => u.id === uid)?.pts || 0) : 0;
+          const myLeagueIdx = getLeagueIndexForPts(myPts);
+
+          // Rang du joueur au sein de sa propre ligue
+          let myRank = null;
+          if (uid) {
+            const tier = LEAGUE_TIERS[myLeagueIdx];
+            const sameLeague = withPts
+              .filter(u => u.pts >= tier.min && (tier.max === null || u.pts <= tier.max))
+              .sort((a, b) => b.pts - a.pts);
+            const idx = sameLeague.findIndex(u => u.id === uid);
+            if (idx >= 0) myRank = { rank: idx + 1, total: sameLeague.length };
+          }
+
+          send(ws, "league_state", {
+            tiers: LEAGUE_TIERS.map((t, i) => ({ ...t, players: counts[i] })),
+            myPts, myLeagueIdx, myRank
+          });
+        } catch (e) {
+          console.error('get_league', e);
+          send(ws, "league_state", { tiers: [], myPts: 0, myLeagueIdx: 0, myRank: null });
         }
         break;
       }
