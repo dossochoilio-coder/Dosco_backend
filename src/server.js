@@ -646,37 +646,7 @@ async function handleMove(ws, uid, { gameId, from, to }) {
     settleStakes(game, end.winner).catch(e => console.error('settle', e));
     const endData = { gameId, winner: end.winner, endType: end.type, reason: end.reason || null, stake: game.stake };
     // Si c'est une partie de TOURNOI : faire avancer le gagnant dans le bracket
-    if (game.tournament && end.winner) {
-      try {
-        const winnerUid = game.players[end.winner]; // end.winner = "B" ou "W" → uid
-        const bracket = tournaments.get(game.tournament.weekId);
-        if (bracket && winnerUid) {
-          advanceTournament(bracket, game.tournament.matchId, winnerUid);
-          persistBracket(bracket);
-          endData.tournament = { weekId: game.tournament.weekId, matchId: game.tournament.matchId };
-          console.log(`[tournament] Match ${game.tournament.matchId} terminé, gagnant: ${winnerUid}`);
-          // Le champion vient d'être désigné (finale) → créditer la récompense
-          if (bracket.champion && bracket.champion.uid === winnerUid && !bracket._prizePaid) {
-            bracket._prizePaid = true;
-            const champUser = await loadUser(winnerUid);
-            if (champUser) {
-              champUser.stars = (champUser.stars || 0) + TOURNAMENT_PRIZE;
-              await persistUser(champUser);
-              console.log(`[tournament] 🏆 ${champUser.name} CHAMPION → +${TOURNAMENT_PRIZE}★ (solde ${champUser.stars})`);
-              endData.tournament.champion = true;
-              endData.tournament.prize = TOURNAMENT_PRIZE;
-              endData.tournament.newStars = champUser.stars;
-            }
-          }
-          // Diffuser le bracket mis à jour à tous les participants connectés
-          const bs = serializeBracket(bracket);
-          for (const puid of bracket.players) {
-            const pws = playerSockets.get(puid);
-            if (pws) send(pws, "tournament_state", { weekId: bracket.weekId, bracket: bs, joined: true });
-          }
-        }
-      } catch (e) { console.error('tournament advance', e); }
-    }
+    await handleTournamentGameEnd(game, end.winner, endData);
     if (p1ws) send(p1ws, "game_end", endData);
     if (p2ws) send(p2ws, "game_end", endData);
     cacheEndedGame(game);
@@ -742,6 +712,44 @@ function findPlayerMatch(bracket, uid) {
     }
   }
   return null;
+}
+
+// Si la partie qui vient de se terminer était un match de tournoi : faire
+// avancer le gagnant dans le bracket, créditer le champion le cas échéant,
+// et diffuser le bracket à jour à tous les participants connectés.
+// Facteur commun à TOUTES les fins de partie (coup gagnant, abandon, etc.) —
+// avant ce correctif, seule la fin par coup gagnant appelait cette logique :
+// un abandon en tournoi ne faisait jamais progresser le bracket.
+async function handleTournamentGameEnd(game, winnerColor, endData) {
+  if (!game.tournament || !winnerColor) return;
+  try {
+    const winnerUid = game.players[winnerColor];
+    const bracket = tournaments.get(game.tournament.weekId);
+    if (!bracket || !winnerUid) return;
+    advanceTournament(bracket, game.tournament.matchId, winnerUid);
+    persistBracket(bracket);
+    endData.tournament = { weekId: game.tournament.weekId, matchId: game.tournament.matchId };
+    console.log(`[tournament] Match ${game.tournament.matchId} terminé, gagnant: ${winnerUid}`);
+    // Le champion vient d'être désigné (finale) → créditer la récompense
+    if (bracket.champion && bracket.champion.uid === winnerUid && !bracket._prizePaid) {
+      bracket._prizePaid = true;
+      const champUser = await loadUser(winnerUid);
+      if (champUser) {
+        champUser.stars = (champUser.stars || 0) + TOURNAMENT_PRIZE;
+        await persistUser(champUser);
+        console.log(`[tournament] 🏆 ${champUser.name} CHAMPION → +${TOURNAMENT_PRIZE}★ (solde ${champUser.stars})`);
+        endData.tournament.champion = true;
+        endData.tournament.prize = TOURNAMENT_PRIZE;
+        endData.tournament.newStars = champUser.stars;
+      }
+    }
+    // Diffuser le bracket mis à jour à tous les participants connectés
+    const bs = serializeBracket(bracket);
+    for (const puid of bracket.players) {
+      const pws = playerSockets.get(puid);
+      if (pws) send(pws, "tournament_state", { weekId: bracket.weekId, bracket: bs, joined: true });
+    }
+  } catch (e) { console.error('tournament advance', e); }
 }
 
 // Enregistrer le résultat d'un match de tournoi et faire avancer le gagnant
@@ -1057,6 +1065,10 @@ wss.on('connection', (ws) => {
             reason: "Match nul accepté — mises conservées",
             stake: game.stake
           };
+          // Cas tournoi : un nul n'a pas de vainqueur (handleTournamentGameEnd
+          // ne fait rien de plus dans ce cas), mais on l'appelle par cohérence
+          // au cas où une règle de départage serait ajoutée plus tard.
+          await handleTournamentGameEnd(game, null, endData);
           // Diagnostic détaillé : état des sockets des DEUX joueurs
           const s1 = p1ws ? send(p1ws, "game_end", endData) : false;
           const s2 = p2ws ? send(p2ws, "game_end", endData) : false;
@@ -1086,6 +1098,9 @@ wss.on('connection', (ws) => {
         const p1ws = playerSockets.get(game.players.B);
         const p2ws = playerSockets.get(game.players.W);
         const endData = { gameId: msg.gameId, winner, endType: "forfeit", stake: game.stake };
+        // Si c'est une partie de TOURNOI : faire avancer le gagnant dans le bracket
+        // (bug corrigé : un abandon en tournoi ne faisait jamais progresser le bracket)
+        await handleTournamentGameEnd(game, winner, endData);
         const s1 = p1ws ? send(p1ws, "game_end", endData) : false;
         const s2 = p2ws ? send(p2ws, "game_end", endData) : false;
         pendingGameEnds.set(game.players.B, { endData, ts: Date.now() });
@@ -1458,6 +1473,8 @@ wss.on('connection', (ws) => {
             console.log(`[disconnect-forfait] ${gid} | ${disconnectedUid} absent 90s → victoire ${winner}`);
             settleStakes(game, winner).catch(e => console.error('settle', e));
             const endData = { gameId: gid, winner, endType: "disconnect", stake: game.stake };
+            // Si c'est une partie de TOURNOI : faire avancer le gagnant dans le bracket
+            handleTournamentGameEnd(game, winner, endData).catch(e => console.error('tournament advance (disconnect)', e));
             const oppWs = playerSockets.get(game.players[winner]);
             if (oppWs) send(oppWs, "game_end", endData);
             pendingGameEnds.set(game.players.B, { endData, ts: Date.now() });
